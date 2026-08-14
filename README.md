@@ -1,11 +1,11 @@
-# nbstudio
+# langsmith-studio-nb
 
 Open [LangGraph Studio](https://docs.langchain.com/langsmith/studio) on an agent you defined in a notebook cell.
 
-Studio runs in your browser and connects to an agent server over HTTP. In a notebook that server has to be started from Python, on a background thread, and — when the kernel lives on a different machine than the browser, as in Colab — reached through a public URL. `nbstudio` does all of that in one call:
+Studio runs in your browser and connects to an agent server over HTTP. In a notebook that server has to be started from Python, on a background thread, and — when the kernel lives on a different machine than the browser, as in Colab — reached through a public URL. `langsmith-studio-nb` does all of that in one call:
 
 ```python
-from nbstudio import start_studio
+from langsmith_studio_nb import start_studio
 
 start_studio()
 ```
@@ -15,7 +15,7 @@ You get a clickable Studio link. That's the whole API.
 ## Install
 
 ```python
-%pip install git+https://github.com/langchain-samples/nbstudio.git
+%pip install git+https://github.com/langchain-samples/langsmith-studio-nb.git
 ```
 
 Requires Python 3.11+. `langgraph-cli[inmem]` is installed as a dependency, so this is the only install line you need.
@@ -23,7 +23,7 @@ Requires Python 3.11+. `langgraph-cli[inmem]` is installed as a dependency, so t
 ## Quickstart
 
 ```python
-%pip install -q git+https://github.com/langchain-samples/nbstudio.git deepagents
+%pip install -q git+https://github.com/langchain-samples/langsmith-studio-nb.git deepagents
 ```
 
 ```python
@@ -51,7 +51,7 @@ agent = create_deep_agent(
 ```
 
 ```python
-from nbstudio import start_studio
+from langsmith_studio_nb import start_studio
 
 start_studio()
 ```
@@ -96,7 +96,7 @@ Stops the running server and its tunnel. Safe to call when nothing is running.
 Every side effect the package performs, in one injectable frozen dataclass. Substitute it in tests:
 
 ```python
-from nbstudio import Runtime, start_studio
+from langsmith_studio_nb import Runtime, start_studio
 
 start_studio(runtime=Runtime(probe=lambda url: True, ...))
 ```

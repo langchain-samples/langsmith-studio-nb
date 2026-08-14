@@ -1,4 +1,4 @@
-from nbstudio._urls import STUDIO_ORIGIN, studio_url
+from langsmith_studio_nb._urls import STUDIO_ORIGIN, studio_url
 
 
 def test_studio_url_without_workspace():

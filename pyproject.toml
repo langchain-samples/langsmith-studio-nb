@@ -1,5 +1,5 @@
 [project]
-name = "nbstudio"
+name = "langsmith-studio-nb"
 version = "0.1.0"
 description = "Open LangGraph Studio on an agent defined in your notebook — Colab, Kaggle, Binder, JupyterHub, or local Jupyter."
 readme = "README.md"
@@ -22,8 +22,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/langchain-samples/nbstudio"
-Issues = "https://github.com/langchain-samples/nbstudio/issues"
+Homepage = "https://github.com/langchain-samples/langsmith-studio-nb"
+Issues = "https://github.com/langchain-samples/langsmith-studio-nb/issues"
 
 [dependency-groups]
 dev = [
@@ -54,11 +54,11 @@ convention = "google"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not integration' --cov=nbstudio --cov-branch --cov-report=term-missing --cov-fail-under=100"
+addopts = "-m 'not integration' --cov=langsmith_studio_nb --cov-branch --cov-report=term-missing --cov-fail-under=100"
 markers = ["integration: boots a real agent server"]
 
 [tool.coverage.run]
-source = ["nbstudio"]
+source = ["langsmith_studio_nb"]
 
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", '^\s*\.\.\.$']

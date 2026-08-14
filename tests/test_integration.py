@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import pytest
 from langgraph.graph import END, START, StateGraph
 
-from nbstudio import start_studio, stop_studio
+from langsmith_studio_nb import start_studio, stop_studio
 
 pytestmark = pytest.mark.integration
 

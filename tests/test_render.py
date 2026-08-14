@@ -1,4 +1,4 @@
-from nbstudio._render import link_html, render
+from langsmith_studio_nb._render import link_html, render
 
 
 def test_link_html_contains_url_and_opens_a_new_tab():

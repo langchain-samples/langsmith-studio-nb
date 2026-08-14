@@ -1,6 +1,6 @@
 import pytest
 
-from nbstudio._environment import NotebookEnvironment, detect_environment, needs_tunnel
+from langsmith_studio_nb._environment import NotebookEnvironment, detect_environment, needs_tunnel
 
 
 @pytest.mark.parametrize(

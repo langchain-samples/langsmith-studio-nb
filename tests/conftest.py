@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from nbstudio import _session
-from nbstudio._runtime import Runtime
+from langsmith_studio_nb import _session
+from langsmith_studio_nb._runtime import Runtime
 
 
 class FakeWorker:

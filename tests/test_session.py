@@ -1,7 +1,7 @@
 import pytest
 
-from nbstudio import _session
-from nbstudio._session import StudioSession, start_studio, stop_studio
+from langsmith_studio_nb import _session
+from langsmith_studio_nb._session import StudioSession, start_studio, stop_studio
 from tests.conftest import FakeRuntime, FakeWorker
 
 

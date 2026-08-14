@@ -1,4 +1,4 @@
-from nbstudio._teardown import is_cloudflared_process, is_uvicorn_server, shut_down
+from langsmith_studio_nb._teardown import is_cloudflared_process, is_uvicorn_server, shut_down
 
 
 class Server:

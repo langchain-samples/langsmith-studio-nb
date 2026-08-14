@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nbstudio._environment import detect_environment, needs_tunnel
-from nbstudio._runtime import Runtime, Worker
-from nbstudio._teardown import shut_down
-from nbstudio._urls import studio_url
+from langsmith_studio_nb._environment import detect_environment, needs_tunnel
+from langsmith_studio_nb._runtime import Runtime, Worker
+from langsmith_studio_nb._teardown import shut_down
+from langsmith_studio_nb._urls import studio_url
 
 DEFAULT_GRAPH_NAME = "agent"
 DEFAULT_HOST = "127.0.0.1"

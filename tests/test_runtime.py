@@ -6,8 +6,8 @@ import urllib.request
 import IPython.display
 import pytest
 
-from nbstudio import _runtime
-from nbstudio._runtime import (
+from langsmith_studio_nb import _runtime
+from langsmith_studio_nb._runtime import (
     Runtime,
     default_display_html,
     default_live_objects,
@@ -127,7 +127,7 @@ def test_default_modules_lists_imported_modules():
 
 
 def test_default_live_objects_includes_this_object():
-    marker = ["nbstudio-marker"]  # object() is not tracked by the garbage collector
+    marker = ["langsmith_studio_nb-marker"]  # object() is not tracked by the garbage collector
 
     assert any(candidate is marker for candidate in default_live_objects())
 

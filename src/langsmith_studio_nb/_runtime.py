@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Iterable, MutableMapping
 
-from nbstudio._render import render
+from langsmith_studio_nb._render import render
 
 
 class Worker(Protocol):
