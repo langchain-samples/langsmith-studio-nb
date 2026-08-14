@@ -1,0 +1,64 @@
+[project]
+name = "nbstudio"
+version = "0.1.0"
+description = "Open LangGraph Studio on an agent defined in your notebook — Colab, Kaggle, Binder, JupyterHub, or local Jupyter."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+keywords = ["langgraph", "langsmith", "studio", "jupyter", "colab", "notebook", "agents"]
+authors = [{ name = "LangChain" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Jupyter",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "langgraph-cli[inmem]>=0.4.31",
+    "ipython>=8.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/langchain-samples/nbstudio"
+Issues = "https://github.com/langchain-samples/nbstudio/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "ty>=0.0.1a5",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "ANN", "B", "C4", "D", "E", "F", "I", "N",
+    "PL", "PT", "RUF", "S", "SIM", "TC", "UP", "W",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "D", "PLR0913", "PLR2004", "RUF012", "S101", "S310", "TC"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not integration' --cov=nbstudio --cov-branch --cov-report=term-missing --cov-fail-under=100"
+markers = ["integration: boots a real agent server"]
+
+[tool.coverage.run]
+source = ["nbstudio"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", '^\s*\.\.\.$']
