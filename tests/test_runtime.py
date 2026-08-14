@@ -1,3 +1,4 @@
+import logging
 import sys
 import threading
 import types
@@ -14,6 +15,7 @@ from langsmith_studio_nb._runtime import (
     default_modules,
     default_namespace,
     default_probe,
+    default_quiet,
     default_render,
     default_run_server,
     default_spawn,
@@ -136,8 +138,7 @@ def test_default_display_html(monkeypatch):
     shown = []
     monkeypatch.setattr(IPython.display, "display", shown.append)
 
-    default_display_html("<b>hi</b>")
-
+    assert default_display_html("<b>hi</b>") is True
     assert shown[0].data == "<b>hi</b>"
 
 
@@ -145,17 +146,42 @@ def test_default_display_html_without_ipython(monkeypatch):
     """The package must not require IPython; Colab pins an old one."""
     monkeypatch.setitem(sys.modules, "IPython.display", None)
 
-    default_display_html("<b>hi</b>")
+    assert default_display_html("<b>hi</b>") is False
 
 
-def test_default_render_displays_and_prints(monkeypatch, capsys):
+def test_default_render_displays_the_button_only(monkeypatch, capsys):
     shown = []
-    monkeypatch.setattr(_runtime, "default_display_html", shown.append)
 
-    default_render("https://studio.example")
+    def display(html):
+        shown.append(html)
+        return True
+
+    monkeypatch.setattr(_runtime, "default_display_html", display)
+
+    default_render("https://studio.example", "add the domain")
 
     assert "https://studio.example" in shown[0]
-    assert capsys.readouterr().out.strip() == "https://studio.example"
+    assert "add the domain" in shown[0]
+    assert capsys.readouterr().out == ""
+
+
+def test_default_render_falls_back_to_text(monkeypatch, capsys):
+    monkeypatch.setattr(_runtime, "default_display_html", lambda html: False)
+
+    default_render("https://studio.example", "add the domain")
+
+    assert capsys.readouterr().out.strip() == "https://studio.example\nadd the domain"
+
+
+def test_default_quiet_silences_the_server(monkeypatch):
+    levels = {}
+    monkeypatch.setattr(
+        _runtime, "silence_loggers", lambda level: levels.setdefault("level", level)
+    )
+
+    default_quiet()
+
+    assert levels["level"] == logging.ERROR
 
 
 def test_runtime_defaults_are_the_real_implementations():

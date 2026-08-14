@@ -1,7 +1,12 @@
 import pytest
 
 from langsmith_studio_nb import _session
-from langsmith_studio_nb._session import StudioSession, start_studio, stop_studio
+from langsmith_studio_nb._session import (
+    StudioSession,
+    readiness_url,
+    start_studio,
+    stop_studio,
+)
 from tests.conftest import FakeRuntime, FakeWorker
 
 
@@ -17,7 +22,7 @@ def test_start_studio_serves_the_notebook_agent_and_returns_the_studio_url():
         ),
         tunnel=False,
     )
-    assert fake.rendered == [session.studio_url]
+    assert fake.rendered == [(session.studio_url, None)]
     assert fake.server_calls[0]["graphs"] == {"agent": "__main__:agent"}
 
 
@@ -128,3 +133,59 @@ def test_stop_studio_is_safe_with_no_server_running():
     stop_studio()
 
     assert _session._active is None
+
+
+def test_start_studio_silences_the_server_by_default():
+    fake = FakeRuntime()
+
+    start_studio(runtime=fake.build())
+
+    assert fake.quieted == 1
+    assert fake.server_calls[0]["server_level"] == "ERROR"
+
+
+def test_start_studio_verbose_keeps_the_server_logs():
+    fake = FakeRuntime()
+
+    start_studio(runtime=fake.build(), verbose=True)
+
+    assert fake.quieted == 0
+    assert fake.server_calls[0]["server_level"] == "INFO"
+
+
+def test_start_studio_hints_at_allowed_domains_when_tunneling():
+    fake = FakeRuntime(modules=("google.colab",))
+
+    start_studio(runtime=fake.build())
+
+    _, hint = fake.rendered[0]
+    assert hint is not None
+    assert "*.trycloudflare.com" in hint
+
+
+def test_session_renders_as_nothing_when_echoed():
+    """The link is already displayed; the dataclass repr would duplicate it."""
+    session = StudioSession(api_url="http://x", studio_url="http://y", tunnel=False)
+
+    assert session._repr_html_() == ""
+
+
+def test_readiness_url_polls_the_local_server_when_tunneling():
+    """A tunnel hostname may not resolve from the kernel; only the browser matters."""
+    url = readiness_url("https://x.trycloudflare.com", port=2024, tunnel=True)
+
+    assert url == "http://127.0.0.1:2024/ok"
+
+
+def test_readiness_url_polls_the_server_url_when_direct():
+    url = readiness_url("http://127.0.0.1:8123", port=8123, tunnel=False)
+
+    assert url == "http://127.0.0.1:8123/ok"
+
+
+def test_start_studio_probes_locally_while_tunneling():
+    fake = FakeRuntime(modules=("google.colab",), api_url="https://x.trycloudflare.com")
+
+    session = start_studio(runtime=fake.build())
+
+    assert session.api_url == "https://x.trycloudflare.com"

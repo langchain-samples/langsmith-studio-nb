@@ -1,4 +1,4 @@
-from langsmith_studio_nb._render import link_html, render
+from langsmith_studio_nb._render import link_html, link_text
 
 
 def test_link_html_contains_url_and_opens_a_new_tab():
@@ -6,13 +6,18 @@ def test_link_html_contains_url_and_opens_a_new_tab():
 
     assert 'href="https://smith.langchain.com/studio/?baseUrl=x"' in html
     assert 'target="_blank"' in html
+    assert "<div" not in html
 
 
-def test_render_shows_html_and_echoes_the_url():
-    shown: list[str] = []
-    echoed: list[str] = []
+def test_link_html_appends_a_hint():
+    html = link_html("https://studio.example", hint="Add *.trycloudflare.com")
 
-    render("https://studio.example", display_html=shown.append, echo=echoed.append)
+    assert "Add *.trycloudflare.com" in html
+    assert html.index("Add *.trycloudflare.com") > html.index("Open LangGraph Studio")
 
-    assert shown == [link_html("https://studio.example")]
-    assert echoed == ["https://studio.example"]
+
+def test_link_text():
+    assert link_text("https://studio.example") == "https://studio.example"
+    assert link_text("https://studio.example", hint="do this") == (
+        "https://studio.example\ndo this"
+    )

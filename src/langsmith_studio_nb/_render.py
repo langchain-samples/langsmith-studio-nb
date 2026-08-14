@@ -2,28 +2,23 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
 _BUTTON = (
     '<a href="{url}" target="_blank" rel="noopener" '
     'style="display:inline-block;padding:12px 20px;background:#1C3C3C;color:#fff;'
     'border-radius:8px;font:600 15px sans-serif;text-decoration:none">'
     "&#127912; Open LangGraph Studio</a>"
 )
+_HINT = '<div style="margin-top:8px;font:400 13px sans-serif;color:#6b7280">{hint}</div>'
 
 
-def link_html(url: str) -> str:
-    """Return the clickable Studio button as an HTML fragment."""
-    return _BUTTON.format(url=url)
+def link_html(url: str, *, hint: str | None = None) -> str:
+    """Return the clickable Studio button, optionally followed by a hint."""
+    html = _BUTTON.format(url=url)
+    if hint:
+        html = f"{html}{_HINT.format(hint=hint)}"
+    return html
 
 
-def render(url: str, *, display_html: Callable[[str], None], echo: Callable[[str], None]) -> None:
-    """Show the Studio link, always echoing the raw URL as a fallback.
-
-    Some notebook hosts strip rendered HTML, so the plain URL is not redundant.
-    """
-    display_html(link_html(url))
-    echo(url)
+def link_text(url: str, *, hint: str | None = None) -> str:
+    """Return the same link and hint as plain text, for hosts without HTML output."""
+    return f"{url}\n{hint}" if hint else url

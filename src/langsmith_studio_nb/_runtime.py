@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import sys
 import threading
@@ -15,7 +16,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Iterable, MutableMapping
 
-from langsmith_studio_nb._render import render
+from langsmith_studio_nb._logging import silence_loggers
+from langsmith_studio_nb._render import link_html, link_text
 
 
 class Worker(Protocol):
@@ -82,18 +84,25 @@ def default_live_objects() -> Iterable[Any]:
     return gc.get_objects()
 
 
-def default_display_html(html: str) -> None:
-    """Render `html` in the notebook output, when there is one."""
+def default_display_html(html: str) -> bool:
+    """Render `html` in the notebook output, reporting whether it was shown."""
     try:
         from IPython.display import HTML, display  # noqa: PLC0415 - only needed inside a notebook
-    except ImportError:  # no notebook front end; the plain URL still prints
-        return
+    except ImportError:
+        return False
     display(HTML(html))
+    return True
 
 
-def default_render(url: str) -> None:
-    """Show the Studio link in the notebook output."""
-    render(url, display_html=default_display_html, echo=print)
+def default_render(url: str, hint: str | None = None) -> None:
+    """Show the Studio link, falling back to plain text outside a notebook."""
+    if not default_display_html(link_html(url, hint=hint)):
+        print(link_text(url, hint=hint))
+
+
+def default_quiet() -> None:
+    """Silence the agent server's logs."""
+    silence_loggers(logging.ERROR)
 
 
 @dataclass(frozen=True)
@@ -107,7 +116,8 @@ class Runtime:
     namespace: Callable[[], MutableMapping[str, Any]] = default_namespace
     modules: Callable[[], Container[str]] = default_modules
     live_objects: Callable[[], Iterable[Any]] = default_live_objects
-    render: Callable[[str], None] = default_render
+    render: Callable[[str, str | None], None] = default_render
+    quiet: Callable[[], None] = default_quiet
     sleep: Callable[[float], None] = time.sleep
     now: Callable[[], float] = time.monotonic
     environ: MutableMapping[str, str] = field(default_factory=lambda: os.environ)

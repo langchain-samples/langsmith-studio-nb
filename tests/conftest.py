@@ -52,8 +52,9 @@ class FakeRuntime:
 
         self.clock = 0.0
         self.server_calls: list[dict[str, Any]] = []
-        self.rendered: list[str] = []
+        self.rendered: list[tuple[str, str | None]] = []
         self.sleeps: list[float] = []
+        self.quieted = 0
 
     def run_server(self, **kwargs: Any) -> None:
         self.server_calls.append(kwargs)
@@ -76,8 +77,11 @@ class FakeRuntime:
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
 
-    def render(self, url: str) -> None:
-        self.rendered.append(url)
+    def render(self, url: str, hint: str | None = None) -> None:
+        self.rendered.append((url, hint))
+
+    def quiet(self) -> None:
+        self.quieted += 1
 
     def build(self) -> Runtime:
         return Runtime(
@@ -89,6 +93,7 @@ class FakeRuntime:
             modules=lambda: self.modules_value,
             live_objects=lambda: self.live_objects_value,
             render=self.render,
+            quiet=self.quiet,
             sleep=self.sleep,
             now=self.now,
             environ=self.environ,
