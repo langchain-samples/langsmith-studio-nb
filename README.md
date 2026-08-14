@@ -10,7 +10,7 @@ from langsmith_studio_nb import start_studio
 start_studio()
 ```
 
-You get a clickable Studio link and nothing else — the server's own logs are silenced, since a notebook cell stops scrolling the moment it finishes executing. Pass `verbose=True` when you need them.
+You get a plain-text Studio link and nothing else — the server's own logs are silenced, since a notebook cell stops scrolling the moment it finishes executing. Pass `verbose=True` when you need them.
 
 ## Install
 

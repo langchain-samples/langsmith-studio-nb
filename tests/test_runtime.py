@@ -8,6 +8,7 @@ import IPython.display
 import pytest
 
 from langsmith_studio_nb import _runtime
+from langsmith_studio_nb._render import link_text
 from langsmith_studio_nb._runtime import (
     Runtime,
     default_display_html,
@@ -170,7 +171,9 @@ def test_default_render_falls_back_to_text(monkeypatch, capsys):
 
     default_render("https://studio.example", "add the domain")
 
-    assert capsys.readouterr().out.strip() == "https://studio.example\nadd the domain"
+    assert capsys.readouterr().out.strip() == link_text(
+        "https://studio.example", hint="add the domain"
+    )
 
 
 def test_default_quiet_silences_the_server(monkeypatch):

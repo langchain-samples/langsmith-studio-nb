@@ -1,6 +1,6 @@
 [project]
 name = "langsmith-studio-nb"
-version = "0.1.2"
+version = "0.1.3"
 description = "Open LangGraph Studio on an agent defined in your notebook — Colab, Kaggle, Binder, JupyterHub, or local Jupyter."
 readme = "README.md"
 license = "MIT"
