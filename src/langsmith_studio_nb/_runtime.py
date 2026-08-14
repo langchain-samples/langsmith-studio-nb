@@ -83,9 +83,11 @@ def default_live_objects() -> Iterable[Any]:
 
 
 def default_display_html(html: str) -> None:
-    """Render `html` in the notebook output."""
-    from IPython.display import HTML, display  # noqa: PLC0415 - only needed inside a notebook
-
+    """Render `html` in the notebook output, when there is one."""
+    try:
+        from IPython.display import HTML, display  # noqa: PLC0415 - only needed inside a notebook
+    except ImportError:  # no notebook front end; the plain URL still prints
+        return
     display(HTML(html))
 
 

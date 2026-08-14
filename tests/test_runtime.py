@@ -141,6 +141,13 @@ def test_default_display_html(monkeypatch):
     assert shown[0].data == "<b>hi</b>"
 
 
+def test_default_display_html_without_ipython(monkeypatch):
+    """The package must not require IPython; Colab pins an old one."""
+    monkeypatch.setitem(sys.modules, "IPython.display", None)
+
+    default_display_html("<b>hi</b>")
+
+
 def test_default_render_displays_and_prints(monkeypatch, capsys):
     shown = []
     monkeypatch.setattr(_runtime, "default_display_html", shown.append)

@@ -1,6 +1,6 @@
 [project]
 name = "langsmith-studio-nb"
-version = "0.1.0"
+version = "0.1.1"
 description = "Open LangGraph Studio on an agent defined in your notebook — Colab, Kaggle, Binder, JupyterHub, or local Jupyter."
 readme = "README.md"
 license = "MIT"
@@ -16,9 +16,10 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
+# IPython is deliberately absent: every notebook already has one, and
+# depending on it upgrades Colab out from under `google-colab`.
 dependencies = [
     "langgraph-cli[inmem]>=0.4.31",
-    "ipython>=8.12",
 ]
 
 [project.urls]
@@ -27,6 +28,7 @@ Issues = "https://github.com/langchain-samples/langsmith-studio-nb/issues"
 
 [dependency-groups]
 dev = [
+    "ipython>=8.12",
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "ruff>=0.9",

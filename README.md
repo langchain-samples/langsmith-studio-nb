@@ -103,6 +103,7 @@ start_studio(runtime=Runtime(probe=lambda url: True, ...))
 
 ## Notes
 
+- **No IPython dependency.** The package uses whatever IPython your notebook already has, so installing it will not upgrade Colab's pinned `ipython==7.34.0` out from under `google-colab`.
 - **A tunnel URL is public and unauthenticated** for as long as the cell runs. Fine for a demo agent; think twice with anything sensitive. The tunnel dies with the kernel.
 - **Edits need a restart.** The graph object is registered when the server boots, so re-run `start_studio()` after changing your agent. Hot reload is not available from a notebook.
 - **Colab drops idle runtimes** after roughly 90 minutes. You get a new tunnel URL after reconnecting.
