@@ -1,0 +1,27 @@
+tests/test_runtime.py
+  s_a1663e364b9417::t_2439188192f610 144-150
+README.md
+  s_a1663e364b9417::t_06f3655cca5b68 106
+pyproject.toml
+  s_a1663e364b9417::t_10a5d5668f4eb8 3,19-20,31
+src/langsmith_studio_nb/_runtime.py
+  s_a1663e364b9417::t_5da83787cb2721 86-90
+uv.lock
+  s_a1663e364b9417::t_e31dd1850f7517 1089,1097,1105,1109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "8fc580a3bee26ce65f65ba5d8424d5dbaad8d30d",
+  "prompts": {},
+  "sessions": {
+    "s_a1663e364b9417": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34cb746e-b27b-421b-a5ef-26990b02b057",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Dariel Dato-on <293921406+darieldatoon@users.noreply.github.com>"
+    }
+  }
+}
