@@ -21,13 +21,14 @@ def test_start_studio_serves_the_notebook_agent_and_returns_the_studio_url():
             "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024&organizationId=ws-1"
         ),
         tunnel=False,
+        graphs=("agent",),
     )
     assert fake.rendered == [(session.studio_url, None)]
     assert fake.server_calls[0]["graphs"] == {"agent": "__main__:agent"}
 
 
 def test_start_studio_tunnels_when_the_kernel_is_remote():
-    fake = FakeRuntime(modules=("google.colab",))
+    fake = FakeRuntime(modules=("google.colab",), api_url="https://x.trycloudflare.com")
 
     session = start_studio(runtime=fake.build())
 
@@ -49,8 +50,48 @@ def test_start_studio_serves_a_named_variable_on_a_chosen_port():
 
     start_studio("researcher", port=8123, runtime=fake.build())
 
-    assert fake.server_calls[0]["graphs"] == {"agent": "__main__:researcher"}
+    assert fake.server_calls[0]["graphs"] == {"researcher": "__main__:researcher"}
     assert fake.server_calls[0]["port"] == 8123
+
+
+def test_start_studio_serves_several_agents_at_once():
+    fake = FakeRuntime(namespace={"planner": object(), "writer": object()})
+
+    session = start_studio("planner", "writer", runtime=fake.build())
+
+    assert fake.server_calls[0]["graphs"] == {
+        "planner": "__main__:planner",
+        "writer": "__main__:writer",
+    }
+    assert session.graphs == ("planner", "writer")
+
+
+def test_start_studio_rejects_one_undefined_variable_among_several():
+    fake = FakeRuntime(namespace={"planner": object()})
+
+    with pytest.raises(NameError, match="'writer'"):
+        start_studio("planner", "writer", runtime=fake.build())
+
+    assert fake.server_calls == []
+
+
+def test_start_studio_moves_off_a_port_that_is_taken():
+    fake = FakeRuntime(port_is_free=False, free_port=51234)
+
+    start_studio(runtime=fake.build())
+
+    assert fake.server_calls[0]["port"] == 51234
+
+
+def test_start_studio_reports_a_tunnel_that_never_came_up():
+    """The server falls back to a local URL, which the browser cannot reach."""
+    fake = FakeRuntime(modules=("google.colab",), api_url="http://127.0.0.1:2024")
+
+    with pytest.raises(RuntimeError, match="Re-run this cell"):
+        start_studio(runtime=fake.build())
+
+    assert fake.rendered == []
+    assert _session._active is None
 
 
 def test_start_studio_without_a_workspace_omits_the_organization():
@@ -154,7 +195,7 @@ def test_start_studio_verbose_keeps_the_server_logs():
 
 
 def test_start_studio_hints_at_allowed_domains_when_tunneling():
-    fake = FakeRuntime(modules=("google.colab",))
+    fake = FakeRuntime(modules=("google.colab",), api_url="https://x.trycloudflare.com")
 
     start_studio(runtime=fake.build())
 
@@ -165,7 +206,9 @@ def test_start_studio_hints_at_allowed_domains_when_tunneling():
 
 def test_session_renders_as_nothing_when_echoed():
     """The link is already displayed; the dataclass repr would duplicate it."""
-    session = StudioSession(api_url="http://x", studio_url="http://y", tunnel=False)
+    session = StudioSession(
+        api_url="http://x", studio_url="http://y", tunnel=False, graphs=("agent",)
+    )
 
     assert session._repr_html_() == ""
 

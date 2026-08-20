@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -53,6 +54,26 @@ def default_probe(url: str, *, timeout: float = 5.0) -> bool:
             return bool(response.status == HTTPStatus.OK)
     except OSError:
         return False
+
+
+def default_port_is_free(port: int, *, host: str = "127.0.0.1") -> bool:
+    """Report whether `port` can be bound on `host`."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        # Matches the server's own check: without it a port still in TIME_WAIT
+        # from the server we just stopped reads as busy.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+        return True
+
+
+def default_find_free_port(*, host: str = "127.0.0.1") -> int:
+    """Return a port nothing is listening on."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
 
 
 def default_workspace_id() -> str | None:
@@ -112,6 +133,8 @@ class Runtime:
     run_server: Callable[..., None] = default_run_server
     spawn: Callable[[Callable[[], None]], Worker] = default_spawn
     probe: Callable[[str], bool] = default_probe
+    port_is_free: Callable[[int], bool] = default_port_is_free
+    find_free_port: Callable[[], int] = default_find_free_port
     workspace_id: Callable[[], str | None] = default_workspace_id
     namespace: Callable[[], MutableMapping[str, Any]] = default_namespace
     modules: Callable[[], Container[str]] = default_modules

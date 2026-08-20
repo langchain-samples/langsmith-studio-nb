@@ -1086,7 +1086,7 @@ otel = [
 
 [[package]]
 name = "langsmith-studio-nb"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "langgraph-cli", extra = ["inmem"] },

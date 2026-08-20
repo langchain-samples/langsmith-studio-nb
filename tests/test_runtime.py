@@ -1,4 +1,5 @@
 import logging
+import socket
 import sys
 import threading
 import types
@@ -12,9 +13,11 @@ from langsmith_studio_nb._render import link_text
 from langsmith_studio_nb._runtime import (
     Runtime,
     default_display_html,
+    default_find_free_port,
     default_live_objects,
     default_modules,
     default_namespace,
+    default_port_is_free,
     default_probe,
     default_quiet,
     default_render,
@@ -121,6 +124,20 @@ def test_default_workspace_id_without_langsmith_installed(monkeypatch):
     assert default_workspace_id() is None
 
 
+def test_default_port_is_free():
+    port = default_find_free_port()
+
+    assert default_port_is_free(port) is True
+
+
+def test_default_port_is_free_reports_a_port_in_use():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+
+        assert default_port_is_free(taken.getsockname()[1]) is False
+
+
 def test_default_namespace_is_the_notebook_namespace():
     assert default_namespace() is sys.modules["__main__"].__dict__
 
@@ -192,4 +209,6 @@ def test_runtime_defaults_are_the_real_implementations():
 
     assert runtime.run_server is default_run_server
     assert runtime.probe is default_probe
+    assert runtime.port_is_free is default_port_is_free
+    assert runtime.find_free_port is default_find_free_port
     assert runtime.environ is not None

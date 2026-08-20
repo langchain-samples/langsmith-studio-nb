@@ -58,6 +58,16 @@ start_studio()
 
 Edit the agent and re-run the last two cells to pick up your changes — `start_studio` stops the previous server first.
 
+## Several agents at once
+
+Pass every variable you want to demo and pick between them in Studio's graph menu:
+
+```python
+start_studio("planner", "writer")
+```
+
+One server, one tunnel, one link. Prefer this over calling `start_studio` again for the second agent: each call replaces the running server, and — when tunneling — hands you a fresh `*.trycloudflare.com` host, which Studio only reaches if the wildcard is on your allowed domains.
+
 ## Where it works
 
 `start_studio` tunnels only when the browser cannot reach the kernel directly.
@@ -81,11 +91,11 @@ start_studio(tunnel=False)  # e.g. a remote kernel you already expose yourself
 
 ## API
 
-### `start_studio(variable="agent", *, port=2024, tunnel=None, timeout=180, verbose=False)`
+### `start_studio(*variables, port=2024, tunnel=None, timeout=180, verbose=False)`
 
-Serves the compiled graph bound to `variable` in the notebook namespace and displays a Studio link. Returns a `StudioSession` with `api_url`, `studio_url`, and `tunnel`.
+Serves the compiled graphs bound to `variables` in the notebook namespace — `agent` by default — and displays a Studio link. Each variable becomes a graph of the same name. Returns a `StudioSession` with `api_url`, `studio_url`, `tunnel`, and `graphs`.
 
-Pass `verbose=True` to see the agent server's logs. Raises `NameError` if the variable is undefined, `RuntimeError` if the server dies during startup, and `TimeoutError` if it never answers. A busy port is replaced with a free one automatically.
+Pass `verbose=True` to see the agent server's logs. Raises `NameError` if a variable is undefined, `RuntimeError` if the server dies during startup or the tunnel never comes up, and `TimeoutError` if the server never answers. A busy port is replaced with a free one automatically.
 
 ### `stop_studio()`
 
@@ -105,6 +115,7 @@ start_studio(runtime=Runtime(probe=lambda url: True, ...))
 
 - **No IPython dependency.** The package uses whatever IPython your notebook already has, so installing it will not upgrade Colab's pinned `ipython==7.34.0` out from under `google-colab`.
 - **Studio must trust the tunnel domain.** On first connect, Studio blocks unknown hosts. Add `*.trycloudflare.com` under Advanced Settings → Allowed Domains — the wildcard, not the exact host Studio offers to add for you, which changes every restart. The list lives in browser localStorage, so it is per user and per browser; there is no workspace-level setting. `start_studio` prints this reminder whenever it tunnels.
+- **A failed tunnel is an error, not a link.** When `cloudflared` does not report a URL, the server falls back to a URL only the kernel can reach; `start_studio` stops it and raises rather than printing a link that can only fail to fetch.
 - **A tunnel URL is public and unauthenticated** for as long as the cell runs. Fine for a demo agent; think twice with anything sensitive. The tunnel dies with the kernel.
 - **Edits need a restart.** The graph object is registered when the server boots, so re-run `start_studio()` after changing your agent. Hot reload is not available from a notebook.
 - **Colab drops idle runtimes** after roughly 90 minutes. You get a new tunnel URL after reconnecting.

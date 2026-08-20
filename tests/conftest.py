@@ -38,6 +38,8 @@ class FakeRuntime:
         workspace_id: str | None = "ws-1",
         live_objects: list[Any] | None = None,
         api_url: str | None = "http://127.0.0.1:2024",
+        port_is_free: bool = True,
+        free_port: int = 51234,
         tick: float = 0.1,
     ) -> None:
         self.namespace_value = {"agent": object()} if namespace is None else namespace
@@ -48,6 +50,8 @@ class FakeRuntime:
         self.workspace_id_value = workspace_id
         self.live_objects_value = live_objects or []
         self.api_url = api_url
+        self.port_is_free_value = port_is_free
+        self.free_port = free_port
         self.tick = tick
 
         self.clock = 0.0
@@ -88,6 +92,8 @@ class FakeRuntime:
             run_server=self.run_server,
             spawn=self.spawn,
             probe=self.probe,
+            port_is_free=lambda _port: self.port_is_free_value,
+            find_free_port=lambda: self.free_port,
             workspace_id=lambda: self.workspace_id_value,
             namespace=lambda: self.namespace_value,
             modules=lambda: self.modules_value,
