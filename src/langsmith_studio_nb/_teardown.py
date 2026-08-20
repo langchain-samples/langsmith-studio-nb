@@ -36,14 +36,26 @@ def is_cloudflared_process(candidate: Any) -> bool:  # noqa: ANN401 - scans arbi
     return "cloudflared" in text
 
 
-def shut_down(objects: Iterable[Any]) -> int:
-    """Stop every server and tunnel found in `objects`, returning how many were stopped."""
+def has_live_tunnel(objects: Iterable[Any]) -> bool:
+    """Report whether a tunnel found in `objects` is still running."""
+    return any(
+        is_cloudflared_process(candidate) and candidate.poll() is None for candidate in objects
+    )
+
+
+def shut_down(objects: Iterable[Any], *, keep_tunnels: bool = False) -> int:
+    """Stop every server and tunnel found in `objects`, returning how many were stopped.
+
+    Keeping the tunnels leaves the public URL of a restarting server intact:
+    a quick tunnel is rate limited per IP, so asking for a fresh one on every
+    restart is what fails first on a shared notebook host.
+    """
     stopped = 0
     for candidate in objects:
         if is_uvicorn_server(candidate):
             candidate.should_exit = True
             stopped += 1
-        elif is_cloudflared_process(candidate):
+        elif not keep_tunnels and is_cloudflared_process(candidate):
             candidate.kill()
             stopped += 1
     return stopped

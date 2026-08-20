@@ -1,4 +1,9 @@
-from langsmith_studio_nb._teardown import is_cloudflared_process, is_uvicorn_server, shut_down
+from langsmith_studio_nb._teardown import (
+    has_live_tunnel,
+    is_cloudflared_process,
+    is_uvicorn_server,
+    shut_down,
+)
 
 
 class Server:
@@ -19,9 +24,13 @@ Impostor.__name__ = "Server"
 
 
 class Process:
-    def __init__(self, args) -> None:
+    def __init__(self, args, returncode=None) -> None:
         self.args = args
+        self.returncode = returncode
         self.killed = False
+
+    def poll(self):
+        return self.returncode
 
     def kill(self) -> None:
         self.killed = True
@@ -76,3 +85,21 @@ def test_shut_down_stops_servers_and_tunnels():
 
 def test_shut_down_with_nothing_running():
     assert shut_down([]) == 0
+
+
+def test_shut_down_can_keep_the_tunnels():
+    server = Server()
+    tunnel = Process(["cloudflared", "tunnel"])
+
+    stopped = shut_down([server, tunnel], keep_tunnels=True)
+
+    assert stopped == 1
+    assert server.should_exit is True
+    assert tunnel.killed is False
+
+
+def test_has_live_tunnel():
+    assert has_live_tunnel([Process(["cloudflared", "tunnel"])]) is True
+    assert has_live_tunnel([Process(["cloudflared", "tunnel"], returncode=0)]) is False
+    assert has_live_tunnel([Process(["sleep", "1"]), object()]) is False
+    assert has_live_tunnel([]) is False

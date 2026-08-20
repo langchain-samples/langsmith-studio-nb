@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from langsmith_studio_nb._environment import detect_environment, needs_tunnel
 from langsmith_studio_nb._ports import resolve_port
 from langsmith_studio_nb._runtime import Runtime, Worker
-from langsmith_studio_nb._teardown import shut_down
+from langsmith_studio_nb._teardown import has_live_tunnel, shut_down
 from langsmith_studio_nb._urls import is_loopback_url, studio_url
 
 DEFAULT_GRAPH_NAME = "agent"
@@ -19,8 +20,9 @@ TUNNEL_HINT = (
 )
 TUNNEL_FAILED = (
     "The tunnel never came up, so the server is reachable only from this kernel and "
-    "Studio cannot connect to it. Re-run this cell, or pass verbose=True to see why "
-    "cloudflared did not start."
+    "Studio cannot connect to it. Cloudflare rate limits quick tunnels per IP address, "
+    "which notebook hosts share, so this usually clears on its own: wait a minute and "
+    "re-run this cell. Pass verbose=True to see what cloudflared reported."
 )
 
 _API_URL_VARIABLE = "LANGGRAPH_API_URL"
@@ -28,6 +30,17 @@ _POLL_INTERVAL = 0.5
 _JOIN_TIMEOUT = 20.0
 
 _active: Worker | None = None
+
+
+class _Tunnel(NamedTuple):
+    """A running cloudflared process, by the URL it answers on and the port it forwards to."""
+
+    url: str
+    port: int
+    requested: int  # what the caller asked for, so asking for another port opens another tunnel
+
+
+_tunnel: _Tunnel | None = None
 
 
 @dataclass(frozen=True)
@@ -50,16 +63,29 @@ class StudioSession:
 
 def stop_studio(*, runtime: Runtime | None = None) -> None:
     """Stop a running agent server and its tunnel. Safe to call when none is running."""
-    global _active  # noqa: PLW0603 - one server per kernel, tracked at module scope
+    _stop(runtime or Runtime(), keep_tunnel=False)
 
-    runtime = runtime or Runtime()
-    shut_down(runtime.live_objects())
+
+def _stop(runtime: Runtime, *, keep_tunnel: bool) -> None:
+    """Stop the running server, and the tunnel with it unless it is being kept."""
+    global _active, _tunnel  # noqa: PLW0603 - one server per kernel, tracked at module scope
+
+    shut_down(runtime.live_objects(), keep_tunnels=keep_tunnel)
+    if not keep_tunnel:
+        _tunnel = None
     if _active is not None:
         # run_server restores the environment as it unwinds; a restart that
         # overlaps that would have its API URL wiped out.
         _active.join(timeout=_JOIN_TIMEOUT)
         _active = None
     runtime.environ.pop(_API_URL_VARIABLE, None)
+
+
+def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
+    """Return the tunnel a restart can keep, if one is still running for `requested`."""
+    if _tunnel is None or _tunnel.requested != requested:
+        return None
+    return _tunnel if has_live_tunnel(runtime.live_objects()) else None
 
 
 def start_studio(
@@ -74,7 +100,8 @@ def start_studio(
 
     Pass several names to serve them side by side, and pick between them in
     Studio's graph menu. Restarts any server this kernel already started, so
-    re-running the cell picks up an edited agent.
+    re-running the cell picks up an edited agent, and keeps the tunnel it is
+    already running, so the link stays the same.
 
     Args:
         variables: Names of the compiled graphs in the notebook namespace.
@@ -92,7 +119,7 @@ def start_studio(
             came up.
         TimeoutError: The server did not answer within `timeout`.
     """
-    global _active  # noqa: PLW0603 - one server per kernel, tracked at module scope
+    global _active, _tunnel  # noqa: PLW0603 - one server per kernel, tracked at module scope
 
     runtime = runtime or Runtime()
     graphs = variables or (DEFAULT_GRAPH_NAME,)
@@ -112,14 +139,27 @@ def start_studio(
     if not verbose:
         runtime.quiet()
 
-    stop_studio(runtime=runtime)
-    port = resolve_port(port, is_free=runtime.port_is_free, find_free=runtime.find_free_port)
+    requested = port
+    reused = _reusable_tunnel(requested=requested, runtime=runtime) if tunnel else None
+    _stop(runtime, keep_tunnel=reused is not None)
+    # The tunnel forwards to the port it was opened on, so a restart goes back there.
+    port = resolve_port(
+        reused.port if reused else requested,
+        is_free=runtime.port_is_free,
+        find_free=runtime.find_free_port,
+    )
+    if reused is not None and reused.port != port:
+        # Something else took the port, so the tunnel now forwards to nothing.
+        shut_down(runtime.live_objects())
+        reused = _tunnel = None
+
+    open_tunnel = tunnel and reused is None
     _active = runtime.spawn(
         lambda: runtime.run_server(
             host=DEFAULT_HOST,
             port=port,
             graphs={name: f"__main__:{name}" for name in graphs},
-            tunnel=tunnel,
+            tunnel=open_tunnel,
             reload=False,
             open_browser=False,
             allow_blocking=True,
@@ -127,12 +167,18 @@ def start_studio(
         )
     )
 
-    api_url = _wait_for_server(_active, runtime=runtime, timeout=timeout, port=port, tunnel=tunnel)
-    if tunnel and is_loopback_url(api_url):
+    api_url = _wait_for_server(
+        _active, runtime=runtime, timeout=timeout, port=port, tunnel=open_tunnel
+    )
+    if open_tunnel and is_loopback_url(api_url):
         # The server falls back to its local URL when the tunnel never reports
         # one. Rendering that gives Studio a link it can only fail to fetch.
         stop_studio(runtime=runtime)
         raise RuntimeError(TUNNEL_FAILED)
+
+    if reused is not None:
+        api_url = reused.url
+    _tunnel = _Tunnel(api_url, port, requested) if tunnel else None
 
     url = studio_url(api_url, workspace_id=runtime.workspace_id())
     runtime.render(url, TUNNEL_HINT if tunnel else None)

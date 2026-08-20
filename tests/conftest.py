@@ -24,6 +24,27 @@ class FakeWorker:
         self.joins.append(timeout)
 
 
+class FakeTunnel:
+    """Stand-in for the cloudflared subprocess."""
+
+    args = ("cloudflared", "tunnel", "--url", "http://localhost:2024")
+
+    def __init__(self, *, running: bool = True) -> None:
+        self.returncode = None if running else 0
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
+FakeTunnel.__name__ = "Popen"
+FakeTunnel.__module__ = "subprocess"
+
+
 class FakeRuntime:
     """Builds a `Runtime` whose effects are recorded instead of performed."""
 
@@ -56,12 +77,17 @@ class FakeRuntime:
 
         self.clock = 0.0
         self.server_calls: list[dict[str, Any]] = []
+        self.tunnels: list[FakeTunnel] = []
         self.rendered: list[tuple[str, str | None]] = []
         self.sleeps: list[float] = []
         self.quieted = 0
 
     def run_server(self, **kwargs: Any) -> None:
         self.server_calls.append(kwargs)
+        if kwargs["tunnel"]:  # the real server leaves the cloudflared process behind it
+            tunnel = FakeTunnel()
+            self.tunnels.append(tunnel)
+            self.live_objects_value.append(tunnel)
 
     def spawn(self, target: Any) -> FakeWorker:
         target()  # the real spawn runs this on a thread; run it here to record the call
@@ -108,5 +134,6 @@ class FakeRuntime:
 
 @pytest.fixture(autouse=True)
 def _no_active_server() -> None:
-    """Keep the module-level server handle from leaking between tests."""
+    """Keep the module-level server and tunnel handles from leaking between tests."""
     _session._active = None
+    _session._tunnel = None

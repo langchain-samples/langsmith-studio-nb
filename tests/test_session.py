@@ -87,7 +87,7 @@ def test_start_studio_reports_a_tunnel_that_never_came_up():
     """The server falls back to a local URL, which the browser cannot reach."""
     fake = FakeRuntime(modules=("google.colab",), api_url="http://127.0.0.1:2024")
 
-    with pytest.raises(RuntimeError, match="Re-run this cell"):
+    with pytest.raises(RuntimeError, match="re-run this cell"):
         start_studio(runtime=fake.build())
 
     assert fake.rendered == []
@@ -232,3 +232,68 @@ def test_start_studio_probes_locally_while_tunneling():
     session = start_studio(runtime=fake.build())
 
     assert session.api_url == "https://x.trycloudflare.com"
+
+
+def _tunneling_runtime():
+    return FakeRuntime(modules=("google.colab",), api_url="https://x.trycloudflare.com")
+
+
+def test_start_studio_keeps_the_tunnel_it_is_already_running():
+    """A fresh quick tunnel per restart is what Cloudflare rate limits."""
+    fake = _tunneling_runtime()
+    runtime = fake.build()
+
+    start_studio(runtime=runtime)
+    fake.api_url = "http://127.0.0.1:2024"  # the restarted server opens no tunnel of its own
+    session = start_studio("agent", runtime=runtime)
+
+    assert fake.server_calls[1]["tunnel"] is False
+    assert session.api_url == "https://x.trycloudflare.com"
+    assert session.tunnel is True
+    assert [tunnel.killed for tunnel in fake.tunnels] == [False]
+
+
+def test_start_studio_opens_a_new_tunnel_when_the_old_one_died():
+    fake = _tunneling_runtime()
+    runtime = fake.build()
+
+    start_studio(runtime=runtime)
+    fake.tunnels[0].returncode = 1
+    start_studio(runtime=runtime)
+
+    assert fake.server_calls[1]["tunnel"] is True
+    assert len(fake.tunnels) == 2
+
+
+def test_start_studio_drops_a_tunnel_whose_port_was_taken():
+    """The tunnel forwards to one port only, so a server that moves outruns it."""
+    fake = _tunneling_runtime()
+    runtime = fake.build()
+
+    start_studio(runtime=runtime)
+    fake.port_is_free_value = False
+    start_studio(runtime=runtime)
+
+    assert fake.server_calls[1]["tunnel"] is True
+    assert fake.server_calls[1]["port"] == 51234
+    assert fake.tunnels[0].killed is True
+
+
+def test_stop_studio_gives_up_the_tunnel():
+    fake = _tunneling_runtime()
+    runtime = fake.build()
+
+    start_studio(runtime=runtime)
+    stop_studio(runtime=runtime)
+    start_studio(runtime=runtime)
+
+    assert fake.tunnels[0].killed is True
+    assert fake.server_calls[1]["tunnel"] is True
+
+
+def test_start_studio_remembers_no_tunnel_when_serving_directly():
+    fake = FakeRuntime()
+
+    start_studio(runtime=fake.build(), tunnel=False)
+
+    assert _session._tunnel is None
