@@ -108,7 +108,7 @@ Every side effect the package performs, in one injectable frozen dataclass. Subs
 ```python
 from langsmith_studio_nb import Runtime, start_studio
 
-start_studio(runtime=Runtime(probe=lambda url: True, ...))
+start_studio(runtime=Runtime(probe=lambda url: True))
 ```
 
 ## Notes
@@ -116,7 +116,7 @@ start_studio(runtime=Runtime(probe=lambda url: True, ...))
 - **No IPython dependency.** The package uses whatever IPython your notebook already has, so installing it will not upgrade Colab's pinned `ipython==7.34.0` out from under `google-colab`.
 - **Studio must trust the tunnel domain.** On first connect, Studio blocks unknown hosts. Add `*.trycloudflare.com` under Advanced Settings → Allowed Domains — the wildcard, not the exact host Studio offers to add for you, which changes every time a tunnel opens. The list lives in browser localStorage, so it is per user and per browser; there is no workspace-level setting. `start_studio` prints this reminder whenever it tunnels.
 - **Restarting keeps the tunnel.** Cloudflare rate limits quick tunnels per IP address (`error code: 1015`, `429 Too Many Requests`), and notebook hosts share theirs — a demo that restarts a few times can otherwise stop getting tunnels for a while. So a restart on the same port reuses the tunnel already running: the link does not change, and the restart takes about a second instead of five. The tunnel is asked whether it still answers before it is kept — Cloudflare drops a quick tunnel on its own, and `cloudflared` keeps running behind a hostname that has stopped resolving — so a dropped one is replaced rather than handed back to you. `stop_studio()` gives the tunnel up; the next `start_studio()` opens a fresh one.
-- **A failed tunnel is an error, not a link.** When `cloudflared` does not report a URL, the server falls back to a URL only the kernel can reach; `start_studio` stops it and raises rather than printing a link that can only fail to fetch.
+- **A failed tunnel is an error, not a link.** When `cloudflared` does not report a URL, `start_studio` stops the local server and raises rather than printing a link that can only fail to fetch.
 - **A tunnel URL is public and unauthenticated** for as long as the cell runs. Fine for a demo agent; think twice with anything sensitive. The tunnel dies with the kernel.
 - **Edits need a restart.** The graph object is registered when the server boots, so re-run `start_studio()` after changing your agent. Hot reload is not available from a notebook.
 - **Colab drops idle runtimes** after roughly 90 minutes. You get a new tunnel URL after reconnecting.

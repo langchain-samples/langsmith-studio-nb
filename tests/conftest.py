@@ -7,15 +7,17 @@ from typing import Any
 import pytest
 
 from langsmith_studio_nb import _session
-from langsmith_studio_nb._runtime import Runtime
+from langsmith_studio_nb._runtime import OpenedTunnel, Runtime
 
 
 class FakeWorker:
     """Stand-in for the thread running the agent server."""
 
-    def __init__(self, *, alive: bool = True) -> None:
+    def __init__(self, *, alive: bool = True, stops: bool = True) -> None:
         self.alive = alive
+        self.stops = stops
         self.joins: list[float | None] = []
+        self.stop_calls = 0
 
     def is_alive(self) -> bool:
         return self.alive
@@ -23,26 +25,20 @@ class FakeWorker:
     def join(self, timeout: float | None = None) -> None:
         self.joins.append(timeout)
 
+    def stop(self) -> None:
+        self.stop_calls += 1
+        if self.stops:
+            self.alive = False
 
-class FakeTunnel:
-    """Stand-in for the cloudflared subprocess."""
 
-    args = ("cloudflared", "tunnel", "--url", "http://localhost:2024")
+class FakeTunnelProcess:
+    """Stand-in for the exact cloudflared process owned by a session."""
 
-    def __init__(self, *, running: bool = True) -> None:
-        self.returncode = None if running else 0
+    def __init__(self) -> None:
         self.killed = False
-
-    def poll(self) -> int | None:
-        return self.returncode
 
     def kill(self) -> None:
         self.killed = True
-        self.returncode = -9
-
-
-FakeTunnel.__name__ = "Popen"
-FakeTunnel.__module__ = "subprocess"
 
 
 class FakeRuntime:
@@ -57,9 +53,10 @@ class FakeRuntime:
         probes: list[bool] | None = None,
         unreachable: tuple[str, ...] = (),
         worker: FakeWorker | None = None,
+        spawn_error: Exception | None = None,
         workspace_id: str | None = "ws-1",
-        live_objects: list[Any] | None = None,
-        api_url: str | None = "http://127.0.0.1:2024",
+        tunnel_url: str = "https://x.trycloudflare.com",
+        tunnel_error: Exception | None = None,
         port_is_free: bool = True,
         free_port: int = 51234,
         tick: float = 0.1,
@@ -70,33 +67,42 @@ class FakeRuntime:
         self.probes = probes
         self.unreachable = unreachable
         self.worker = worker or FakeWorker()
+        self.spawn_error = spawn_error
         self.workspace_id_value = workspace_id
-        self.live_objects_value = live_objects or []
-        self.api_url = api_url
+        self.tunnel_url = tunnel_url
+        self.tunnel_error = tunnel_error
         self.port_is_free_value = port_is_free
         self.free_port = free_port
         self.tick = tick
 
         self.clock = 0.0
         self.server_calls: list[dict[str, Any]] = []
-        self.tunnels: list[FakeTunnel] = []
+        self.tunnels: list[FakeTunnelProcess] = []
+        self.opened_tunnel_ports: list[int] = []
         self.rendered: list[tuple[str, str | None]] = []
         self.sleeps: list[float] = []
         self.probed: list[str] = []
         self.quieted = 0
+        self.logging_restored = 0
 
     def run_server(self, **kwargs: Any) -> None:
         self.server_calls.append(kwargs)
-        if kwargs["tunnel"]:  # the real server leaves the cloudflared process behind it
-            tunnel = FakeTunnel()
-            self.tunnels.append(tunnel)
-            self.live_objects_value.append(tunnel)
 
     def spawn(self, target: Any) -> FakeWorker:
+        if self.spawn_error is not None:
+            raise self.spawn_error
         target()  # the real spawn runs this on a thread; run it here to record the call
-        if self.api_url is not None:
-            self.environ["LANGGRAPH_API_URL"] = self.api_url
+        if self.worker.stop_calls and self.worker.stops:
+            self.worker.alive = True
         return self.worker
+
+    def open_tunnel(self, port: int) -> OpenedTunnel:
+        self.opened_tunnel_ports.append(port)
+        if self.tunnel_error is not None:
+            raise self.tunnel_error
+        process = FakeTunnelProcess()
+        self.tunnels.append(process)
+        return OpenedTunnel(url=self.tunnel_url, process=process)
 
     def probe(self, url: str) -> bool:
         self.probed.append(url)
@@ -116,20 +122,25 @@ class FakeRuntime:
     def render(self, url: str, hint: str | None = None) -> None:
         self.rendered.append((url, hint))
 
-    def quiet(self) -> None:
+    def quiet(self):
         self.quieted += 1
+
+        def restore() -> None:
+            self.logging_restored += 1
+
+        return restore
 
     def build(self) -> Runtime:
         return Runtime(
             run_server=self.run_server,
             spawn=self.spawn,
+            open_tunnel=self.open_tunnel,
             probe=self.probe,
             port_is_free=lambda _port: self.port_is_free_value,
             find_free_port=lambda: self.free_port,
             workspace_id=lambda: self.workspace_id_value,
             namespace=lambda: self.namespace_value,
             modules=lambda: self.modules_value,
-            live_objects=lambda: self.live_objects_value,
             render=self.render,
             quiet=self.quiet,
             sleep=self.sleep,
@@ -141,5 +152,4 @@ class FakeRuntime:
 @pytest.fixture(autouse=True)
 def _no_active_server() -> None:
     """Keep the module-level server and tunnel handles from leaking between tests."""
-    _session._active = None
-    _session._tunnel = None
+    _session._state = None

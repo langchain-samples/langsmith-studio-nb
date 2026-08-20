@@ -2,17 +2,7 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
-
 STUDIO_ORIGIN = "https://smith.langchain.com"
-
-# 0.0.0.0 is matched here, never bound.
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "0.0.0.0", "::1", "localhost"})  # noqa: S104
-
-
-def is_loopback_url(url: str) -> bool:
-    """Report whether `url` names this machine, and so is private to the kernel."""
-    return urlsplit(url).hostname in _LOOPBACK_HOSTS
 
 
 def studio_url(
