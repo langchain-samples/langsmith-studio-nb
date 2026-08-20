@@ -55,6 +55,7 @@ class FakeRuntime:
         environ: dict[str, str] | None = None,
         modules: tuple[str, ...] = (),
         probes: list[bool] | None = None,
+        unreachable: tuple[str, ...] = (),
         worker: FakeWorker | None = None,
         workspace_id: str | None = "ws-1",
         live_objects: list[Any] | None = None,
@@ -67,6 +68,7 @@ class FakeRuntime:
         self.environ = dict(environ or {})
         self.modules_value = modules
         self.probes = probes
+        self.unreachable = unreachable
         self.worker = worker or FakeWorker()
         self.workspace_id_value = workspace_id
         self.live_objects_value = live_objects or []
@@ -80,6 +82,7 @@ class FakeRuntime:
         self.tunnels: list[FakeTunnel] = []
         self.rendered: list[tuple[str, str | None]] = []
         self.sleeps: list[float] = []
+        self.probed: list[str] = []
         self.quieted = 0
 
     def run_server(self, **kwargs: Any) -> None:
@@ -96,6 +99,9 @@ class FakeRuntime:
         return self.worker
 
     def probe(self, url: str) -> bool:
+        self.probed.append(url)
+        if any(url.startswith(prefix) for prefix in self.unreachable):
+            return False
         if self.probes is None:
             return True
         return self.probes.pop(0) if self.probes else False

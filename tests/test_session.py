@@ -253,16 +253,29 @@ def test_start_studio_keeps_the_tunnel_it_is_already_running():
     assert [tunnel.killed for tunnel in fake.tunnels] == [False]
 
 
-def test_start_studio_opens_a_new_tunnel_when_the_old_one_died():
+def test_start_studio_opens_a_new_tunnel_when_the_old_one_stopped_answering():
+    """cloudflared outlives the tunnel Cloudflare dropped, so only the URL can be trusted."""
     fake = _tunneling_runtime()
     runtime = fake.build()
 
     start_studio(runtime=runtime)
-    fake.tunnels[0].returncode = 1
+    fake.unreachable = ("https://x.trycloudflare.com",)
     start_studio(runtime=runtime)
 
     assert fake.server_calls[1]["tunnel"] is True
     assert len(fake.tunnels) == 2
+    assert fake.tunnels[0].killed is True
+
+
+def test_start_studio_asks_the_tunnel_itself_before_keeping_it():
+    fake = _tunneling_runtime()
+    runtime = fake.build()
+
+    start_studio(runtime=runtime)
+    fake.probed.clear()
+    start_studio(runtime=runtime)
+
+    assert fake.probed[0] == "https://x.trycloudflare.com/ok"
 
 
 def test_start_studio_drops_a_tunnel_whose_port_was_taken():

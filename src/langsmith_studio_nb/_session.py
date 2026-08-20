@@ -8,7 +8,7 @@ from typing import NamedTuple
 from langsmith_studio_nb._environment import detect_environment, needs_tunnel
 from langsmith_studio_nb._ports import resolve_port
 from langsmith_studio_nb._runtime import Runtime, Worker
-from langsmith_studio_nb._teardown import has_live_tunnel, shut_down
+from langsmith_studio_nb._teardown import shut_down
 from langsmith_studio_nb._urls import is_loopback_url, studio_url
 
 DEFAULT_GRAPH_NAME = "agent"
@@ -82,10 +82,16 @@ def _stop(runtime: Runtime, *, keep_tunnel: bool) -> None:
 
 
 def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
-    """Return the tunnel a restart can keep, if one is still running for `requested`."""
+    """Return the tunnel a restart can keep, if it still answers for `requested`.
+
+    Ask the tunnel itself, while the server it forwards to is still up. A live
+    `cloudflared` process proves nothing: Cloudflare drops a quick tunnel on its
+    own, and a reconnect comes back under a new hostname, leaving the process
+    running behind a URL that answers nothing.
+    """
     if _tunnel is None or _tunnel.requested != requested:
         return None
-    return _tunnel if has_live_tunnel(runtime.live_objects()) else None
+    return _tunnel if runtime.probe(f"{_tunnel.url}/ok") else None
 
 
 def start_studio(

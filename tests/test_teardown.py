@@ -1,5 +1,4 @@
 from langsmith_studio_nb._teardown import (
-    has_live_tunnel,
     is_cloudflared_process,
     is_uvicorn_server,
     shut_down,
@@ -96,10 +95,3 @@ def test_shut_down_can_keep_the_tunnels():
     assert stopped == 1
     assert server.should_exit is True
     assert tunnel.killed is False
-
-
-def test_has_live_tunnel():
-    assert has_live_tunnel([Process(["cloudflared", "tunnel"])]) is True
-    assert has_live_tunnel([Process(["cloudflared", "tunnel"], returncode=0)]) is False
-    assert has_live_tunnel([Process(["sleep", "1"]), object()]) is False
-    assert has_live_tunnel([]) is False

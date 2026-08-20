@@ -36,13 +36,6 @@ def is_cloudflared_process(candidate: Any) -> bool:  # noqa: ANN401 - scans arbi
     return "cloudflared" in text
 
 
-def has_live_tunnel(objects: Iterable[Any]) -> bool:
-    """Report whether a tunnel found in `objects` is still running."""
-    return any(
-        is_cloudflared_process(candidate) and candidate.poll() is None for candidate in objects
-    )
-
-
 def shut_down(objects: Iterable[Any], *, keep_tunnels: bool = False) -> int:
     """Stop every server and tunnel found in `objects`, returning how many were stopped.
 
