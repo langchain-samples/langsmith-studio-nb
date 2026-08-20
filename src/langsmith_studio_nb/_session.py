@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from langsmith_studio_nb._environment import detect_environment, needs_tunnel
 from langsmith_studio_nb._ports import resolve_port
-from langsmith_studio_nb._runtime import Runtime, Worker
-from langsmith_studio_nb._teardown import shut_down
-from langsmith_studio_nb._urls import is_loopback_url, studio_url
+from langsmith_studio_nb._runtime import Runtime, TunnelProcess, Worker
+from langsmith_studio_nb._urls import studio_url
 
 DEFAULT_GRAPH_NAME = "agent"
 DEFAULT_HOST = "127.0.0.1"
@@ -25,22 +27,29 @@ TUNNEL_FAILED = (
     "re-run this cell. Pass verbose=True to see what cloudflared reported."
 )
 
-_API_URL_VARIABLE = "LANGGRAPH_API_URL"
 _POLL_INTERVAL = 0.5
 _JOIN_TIMEOUT = 20.0
 
-_active: Worker | None = None
-
 
 class _Tunnel(NamedTuple):
-    """A running cloudflared process, by the URL it answers on and the port it forwards to."""
+    """An owned cloudflared process and the endpoint it forwards to."""
 
     url: str
     port: int
     requested: int  # what the caller asked for, so asking for another port opens another tunnel
+    process: TunnelProcess
 
 
-_tunnel: _Tunnel | None = None
+@dataclass(frozen=True)
+class _SessionState:
+    """Every resource owned by one running Studio session."""
+
+    worker: Worker
+    tunnel: _Tunnel | None
+    restore_logging: Callable[[], None]
+
+
+_state: _SessionState | None = None
 
 
 @dataclass(frozen=True)
@@ -63,22 +72,35 @@ class StudioSession:
 
 def stop_studio(*, runtime: Runtime | None = None) -> None:
     """Stop a running agent server and its tunnel. Safe to call when none is running."""
-    _stop(runtime or Runtime(), keep_tunnel=False)
+    _ = runtime  # retained for API compatibility with injected test runtimes
+    _stop(keep_tunnel=False)
 
 
-def _stop(runtime: Runtime, *, keep_tunnel: bool) -> None:
-    """Stop the running server, and the tunnel with it unless it is being kept."""
-    global _active, _tunnel  # noqa: PLW0603 - one server per kernel, tracked at module scope
+def _stop(*, keep_tunnel: bool) -> _Tunnel | None:
+    """Stop owned resources, optionally returning the tunnel kept for a restart."""
+    global _state  # noqa: PLW0603 - one owned session per kernel
 
-    shut_down(runtime.live_objects(), keep_tunnels=keep_tunnel)
-    if not keep_tunnel:
-        _tunnel = None
-    if _active is not None:
-        # run_server restores the environment as it unwinds; a restart that
-        # overlaps that would have its API URL wiped out.
-        _active.join(timeout=_JOIN_TIMEOUT)
-        _active = None
-    runtime.environ.pop(_API_URL_VARIABLE, None)
+    if _state is None:
+        return None
+
+    state = _state
+    state.worker.stop()
+    state.worker.join(timeout=_JOIN_TIMEOUT)
+    if state.worker.is_alive():
+        message = (
+            f"The previous agent server did not stop within {_JOIN_TIMEOUT:g}s, "
+            "so a replacement was not started."
+        )
+        raise RuntimeError(message)
+
+    kept = state.tunnel if keep_tunnel else None
+    try:
+        if state.tunnel is not None and not keep_tunnel:
+            state.tunnel.process.kill()
+    finally:
+        state.restore_logging()
+        _state = None
+    return kept
 
 
 def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
@@ -89,9 +111,37 @@ def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
     own, and a reconnect comes back under a new hostname, leaving the process
     running behind a URL that answers nothing.
     """
-    if _tunnel is None or _tunnel.requested != requested:
+    if _state is None or _state.tunnel is None or _state.tunnel.requested != requested:
         return None
-    return _tunnel if runtime.probe(f"{_tunnel.url}/ok") else None
+    return _state.tunnel if runtime.probe(f"{_state.tunnel.url}/ok") else None
+
+
+def _spawn_server(
+    *,
+    graphs: tuple[str, ...],
+    port: int,
+    verbose: bool,
+    runtime: Runtime,
+) -> tuple[Worker, Callable[[], None]]:
+    """Spawn one local server and return it with its logging restorer."""
+    restore_logging = runtime.quiet() if not verbose else lambda: None
+    try:
+        worker = runtime.spawn(
+            lambda: runtime.run_server(
+                host=DEFAULT_HOST,
+                port=port,
+                graphs={name: f"__main__:{name}" for name in graphs},
+                tunnel=False,
+                reload=False,
+                open_browser=False,
+                allow_blocking=True,
+                server_level="INFO" if verbose else "ERROR",
+            )
+        )
+    except BaseException:
+        restore_logging()
+        raise
+    return worker, restore_logging
 
 
 def start_studio(
@@ -125,7 +175,7 @@ def start_studio(
             came up.
         TimeoutError: The server did not answer within `timeout`.
     """
-    global _active, _tunnel  # noqa: PLW0603 - one server per kernel, tracked at module scope
+    global _state  # noqa: PLW0603 - one owned session per kernel
 
     runtime = runtime or Runtime()
     graphs = variables or (DEFAULT_GRAPH_NAME,)
@@ -142,77 +192,65 @@ def start_studio(
         environment = detect_environment(modules=runtime.modules(), environ=runtime.environ)
         tunnel = needs_tunnel(environment)
 
-    if not verbose:
-        runtime.quiet()
-
     requested = port
     reused = _reusable_tunnel(requested=requested, runtime=runtime) if tunnel else None
-    _stop(runtime, keep_tunnel=reused is not None)
-    # The tunnel forwards to the port it was opened on, so a restart goes back there.
-    port = resolve_port(
-        reused.port if reused else requested,
-        is_free=runtime.port_is_free,
-        find_free=runtime.find_free_port,
-    )
-    if reused is not None and reused.port != port:
-        # Something else took the port, so the tunnel now forwards to nothing.
-        shut_down(runtime.live_objects())
-        reused = _tunnel = None
-
-    open_tunnel = tunnel and reused is None
-    _active = runtime.spawn(
-        lambda: runtime.run_server(
-            host=DEFAULT_HOST,
-            port=port,
-            graphs={name: f"__main__:{name}" for name in graphs},
-            tunnel=open_tunnel,
-            reload=False,
-            open_browser=False,
-            allow_blocking=True,
-            server_level="INFO" if verbose else "ERROR",
+    reused = _stop(keep_tunnel=reused is not None)
+    try:
+        # The tunnel forwards to the port it was opened on, so a restart goes back there.
+        port = resolve_port(
+            reused.port if reused else requested,
+            is_free=runtime.port_is_free,
+            find_free=runtime.find_free_port,
         )
-    )
+        if reused is not None and reused.port != port:
+            # Something else took the port, so the tunnel now forwards to nothing.
+            reused.process.kill()
+            reused = None
 
-    api_url = _wait_for_server(
-        _active, runtime=runtime, timeout=timeout, port=port, tunnel=open_tunnel
-    )
-    if open_tunnel and is_loopback_url(api_url):
-        # The server falls back to its local URL when the tunnel never reports
-        # one. Rendering that gives Studio a link it can only fail to fetch.
-        stop_studio(runtime=runtime)
-        raise RuntimeError(TUNNEL_FAILED)
+        worker, restore_logging = _spawn_server(
+            graphs=graphs, port=port, verbose=verbose, runtime=runtime
+        )
+    except BaseException:
+        if reused is not None:
+            reused.process.kill()
+        raise
+    _state = _SessionState(worker=worker, tunnel=reused, restore_logging=restore_logging)
+    try:
+        local_api_url = f"http://{DEFAULT_HOST}:{port}"
+        _wait_for_server(worker, runtime=runtime, timeout=timeout, api_url=local_api_url)
+        api_url = local_api_url
+        if tunnel:
+            if reused is None:
+                try:
+                    opened = runtime.open_tunnel(port)
+                except Exception as error:
+                    raise RuntimeError(TUNNEL_FAILED) from error
+                reused = _Tunnel(opened.url, port, requested, opened.process)
+                _state = _SessionState(
+                    worker=worker, tunnel=reused, restore_logging=restore_logging
+                )
+            api_url = reused.url
 
-    if reused is not None:
-        api_url = reused.url
-    _tunnel = _Tunnel(api_url, port, requested) if tunnel else None
-
-    url = studio_url(api_url, workspace_id=runtime.workspace_id())
-    runtime.render(url, TUNNEL_HINT if tunnel else None)
-    return StudioSession(api_url=api_url, studio_url=url, tunnel=tunnel, graphs=graphs)
-
-
-def readiness_url(api_url: str, *, port: int, tunnel: bool) -> str:
-    """Return the URL to poll while waiting for the server.
-
-    Never poll the tunnel: its hostname can take minutes to resolve from the
-    kernel while resolving immediately in the browser, and only the browser's
-    view of it matters.
-    """
-    return f"http://{DEFAULT_HOST}:{port}/ok" if tunnel else f"{api_url}/ok"
+        url = studio_url(api_url, workspace_id=runtime.workspace_id())
+        runtime.render(url, TUNNEL_HINT if tunnel else None)
+        return StudioSession(api_url=api_url, studio_url=url, tunnel=tunnel, graphs=graphs)
+    except BaseException as error:
+        try:
+            _stop(keep_tunnel=False)
+        except RuntimeError as cleanup_error:
+            error.add_note(str(cleanup_error))
+        raise
 
 
-def _wait_for_server(
-    worker: Worker, *, runtime: Runtime, timeout: float, port: int, tunnel: bool
-) -> str:
-    """Return the server's base URL once it answers, or raise."""
+def _wait_for_server(worker: Worker, *, runtime: Runtime, timeout: float, api_url: str) -> None:
+    """Return once the local server answers, or raise."""
     deadline = runtime.now() + timeout
     while runtime.now() < deadline:
         if not worker.is_alive():
             message = "The agent server stopped while starting up. Check the log above."
             raise RuntimeError(message)
-        api_url = runtime.environ.get(_API_URL_VARIABLE)
-        if api_url and runtime.probe(readiness_url(api_url, port=port, tunnel=tunnel)):
-            return api_url
+        if runtime.probe(f"{api_url}/ok"):
+            return
         runtime.sleep(_POLL_INTERVAL)
     message = (
         f"The agent server did not answer within {timeout:g}s. "
