@@ -1,0 +1,58 @@
+src/langsmith_studio_nb/__init__.py
+  s_8afc1fcf5b2032::t_944668a82429e0 15,24
+tests/test_urls.py
+  s_8afc1fcf5b2032::t_97d99a71f2001d 1
+tests/test_logging.py
+  s_8afc1fcf5b2032::t_97d99a71f2001d 22-30
+  s_8afc1fcf5b2032::t_e35b04cc60002a 33,35
+src/langsmith_studio_nb/_session.py
+  s_8afc1fcf5b2032::t_b4bb72d6aebf32 6-9,117-144,210-212
+  s_8afc1fcf5b2032::t_5dfc5cc407c920 245
+  s_8afc1fcf5b2032::t_305cbaf9f1dbeb 13-14,35,40,43-52,75-76,79-81,83-103,114,116,178,197,217-242,246,252-253
+  s_8afc1fcf5b2032::t_586e8829f63add 198-203,205-208,213-216
+  s_8afc1fcf5b2032::t_3f2af111feb99d 243-244
+README.md
+  s_8afc1fcf5b2032::t_305cbaf9f1dbeb 111
+  s_8afc1fcf5b2032::t_586e8829f63add 119
+src/langsmith_studio_nb/_logging.py
+  s_8afc1fcf5b2032::t_305cbaf9f1dbeb 19-20,43-44,50-60
+  s_8afc1fcf5b2032::t_e35b04cc60002a 30,34
+tests/test_session.py
+  s_8afc1fcf5b2032::t_b4bb72d6aebf32 153-162
+  s_8afc1fcf5b2032::t_7db8f951171ab4 95-105,303-313
+  s_8afc1fcf5b2032::t_4d8252b15ee7d7 9,176,183,187-189,191-192,194,201-224,245-256,258,277,282
+  s_8afc1fcf5b2032::t_69a899d6967b38 30,35-36,87,93-94,139-140,143,149-150,184,200,286,325,350,364,372-373
+  s_8afc1fcf5b2032::t_23f8b02d05b3fd 151-152
+  s_8afc1fcf5b2032::t_ecfcc9655af21b 314-315
+src/langsmith_studio_nb/_runtime.py
+  s_8afc1fcf5b2032::t_e35b04cc60002a 119
+  s_8afc1fcf5b2032::t_305cbaf9f1dbeb 17,35-54,63-104,106-118,120-122,194-196,205,213
+  s_8afc1fcf5b2032::t_b4bb72d6aebf32 18
+tests/test_runtime.py
+  s_8afc1fcf5b2032::t_b4bb72d6aebf32 15-16,99-102,104,106-109,282-284
+  s_8afc1fcf5b2032::t_97d99a71f2001d 21,287-289,292,295,302
+  s_8afc1fcf5b2032::t_85c10145e67452 285
+  s_8afc1fcf5b2032::t_fae882f1afe4e1 105
+  s_8afc1fcf5b2032::t_7db8f951171ab4 73-98,110-160
+  s_8afc1fcf5b2032::t_ca279777b030ef 103
+tests/conftest.py
+  s_8afc1fcf5b2032::t_70c57f98995ebc 10,16,18,20,28-31,34-35,37,58-59,72-73,80-81,86,99-106,125,128-132,137,155
+  s_8afc1fcf5b2032::t_7db8f951171ab4 56,70,92-93
+  s_8afc1fcf5b2032::t_b0e805fa6e3cc1 95-96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "f8d881e9ca48e33d005787b9822d72b3672d0107",
+  "prompts": {},
+  "sessions": {
+    "s_8afc1fcf5b2032": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a01f94-b4e2-7dd0-9852-282c296f0125",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Dariel Dato-on <293921406+darieldatoon@users.noreply.github.com>"
+    }
+  }
+}
