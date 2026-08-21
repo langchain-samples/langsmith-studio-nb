@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 STUDIO_ORIGIN = "https://smith.langchain.com"
+
+
+def port_of(url: str) -> int | None:
+    """Return the port `url` names, or None when it names none."""
+    return urlsplit(url).port
 
 
 def studio_url(

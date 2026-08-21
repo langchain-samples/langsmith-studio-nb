@@ -114,7 +114,7 @@ def test_start_studio_without_a_workspace_omits_the_organization():
 
 
 def test_start_studio_waits_for_the_server_to_answer():
-    fake = FakeRuntime(probes=[False, True])
+    fake = FakeRuntime(statuses=[None, 200])
 
     start_studio(runtime=fake.build())
 
@@ -140,7 +140,7 @@ def test_start_studio_reports_a_server_that_died_on_startup():
 
 
 def test_start_studio_times_out_when_the_url_never_appears():
-    fake = FakeRuntime(probes=[], tick=0.3)
+    fake = FakeRuntime(statuses=[], tick=0.3)
 
     with pytest.raises(TimeoutError, match="did not answer within 1s"):
         start_studio(runtime=fake.build(), timeout=1.0)
@@ -150,16 +150,17 @@ def test_start_studio_times_out_when_the_url_never_appears():
     assert _session._state is None
 
 
-def test_startup_error_records_when_the_worker_cannot_be_cleaned_up():
-    fake = FakeRuntime(worker=FakeWorker(stops=False), probes=[], tick=0.3)
+def test_startup_error_releases_resources_even_when_the_worker_will_not_stop():
+    """A server that outlives the join must not keep the tunnel and log levels with it."""
+    fake = FakeRuntime(
+        modules=("google.colab",), worker=FakeWorker(stops=False), statuses=[], tick=0.3
+    )
 
-    with pytest.raises(TimeoutError) as raised:
+    with pytest.raises(TimeoutError, match="did not answer within 1s"):
         start_studio(runtime=fake.build(), timeout=1.0)
 
-    assert raised.value.__notes__ == [
-        "The previous agent server did not stop within 20s, so a replacement was not started."
-    ]
-    assert _session._state is not None
+    assert _session._state is None
+    assert fake.logging_restored == 1
 
 
 def test_start_studio_restarts_a_running_server():
@@ -184,14 +185,13 @@ def test_stop_studio_stops_the_owned_worker_and_clears_the_state():
     assert _session._state is None
 
 
-def test_start_and_stop_preserve_an_existing_server_url():
-    fake = FakeRuntime(environ={"LANGGRAPH_API_URL": "https://existing.example"})
-    runtime = fake.build()
+def test_start_studio_ignores_a_server_url_it_did_not_publish():
+    """A leftover value would point this session at an endpoint it does not own."""
+    fake = FakeRuntime(environ={"LANGGRAPH_API_URL": "https://stale.example"})
 
-    start_studio(runtime=runtime)
-    stop_studio(runtime=runtime)
+    session = start_studio(runtime=fake.build())
 
-    assert fake.environ["LANGGRAPH_API_URL"] == "https://existing.example"
+    assert session.api_url == "http://127.0.0.1:2024"
 
 
 def test_stop_studio_is_safe_with_no_server_running():
@@ -212,16 +212,29 @@ def test_stop_studio_leaves_unowned_tunnels_alone():
     assert unowned.killed is False
 
 
-def test_restart_refuses_to_overlap_a_worker_that_did_not_stop():
-    fake = FakeRuntime(worker=FakeWorker(stops=False))
+def test_restart_moves_off_a_worker_that_did_not_stop():
+    """Refusing to start would leave the notebook with no server at all."""
+    fake = FakeRuntime(worker=FakeWorker(stops=False), port_is_free=False)
     runtime = fake.build()
     start_studio(runtime=runtime)
 
-    with pytest.raises(RuntimeError, match="replacement was not started"):
-        start_studio(runtime=runtime)
+    session = start_studio(runtime=runtime)
 
-    assert len(fake.server_calls) == 1
-    assert _session._state is not None
+    assert fake.server_calls[1]["port"] == 51234
+    assert session.api_url == "http://127.0.0.1:51234"
+
+
+def test_restart_keeps_the_tunnel_while_the_old_server_drains():
+    """A draining server gives up its port, so its tunnel is still worth keeping."""
+    fake = FakeRuntime(modules=("google.colab",), worker=FakeWorker(stops=False))
+    runtime = fake.build()
+    start_studio(runtime=runtime)
+
+    session = start_studio(runtime=runtime)
+
+    assert len(fake.tunnels) == 1
+    assert fake.tunnels[0].killed is False
+    assert session.api_url == "https://x.trycloudflare.com"
 
 
 def test_start_studio_silences_the_server_by_default():
@@ -318,13 +331,15 @@ def test_start_studio_opens_a_new_tunnel_when_the_old_one_stopped_answering():
     fake = _tunneling_runtime()
     runtime = fake.build()
 
+    fake.tunnel_urls = ["https://dropped.trycloudflare.com", "https://fresh.trycloudflare.com"]
     start_studio(runtime=runtime)
-    fake.unreachable = ("https://x.trycloudflare.com",)
-    start_studio(runtime=runtime)
+    fake.unreachable = ("https://dropped.trycloudflare.com",)
+    session = start_studio(runtime=runtime)
 
     assert fake.server_calls[1]["tunnel"] is False
     assert len(fake.tunnels) == 2
     assert fake.tunnels[0].killed is True
+    assert session.api_url == "https://fresh.trycloudflare.com"
 
 
 def test_start_studio_asks_the_tunnel_itself_before_keeping_it():
@@ -371,3 +386,130 @@ def test_start_studio_remembers_no_tunnel_when_serving_directly():
 
     assert _session._state is not None
     assert _session._state.tunnel is None
+
+
+def test_start_studio_replaces_a_tunnel_that_comes_up_dead():
+    """Some quick tunnels never route; hand back one that answered, not the first one."""
+    fake = FakeRuntime(
+        modules=("google.colab",),
+        tunnel_urls=["https://dead.trycloudflare.com", "https://live.trycloudflare.com"],
+        unroutable=("https://dead.trycloudflare.com",),
+        tick=3.0,
+    )
+
+    session = start_studio(runtime=fake.build())
+
+    assert session.api_url == "https://live.trycloudflare.com"
+    assert [tunnel.killed for tunnel in fake.tunnels] == [True, False]
+    assert fake.opened_tunnel_ports == [2024, 2024]
+
+
+def test_start_studio_gives_up_after_three_dead_tunnels():
+    """Better an error than a link that cannot work; each attempt costs a tunnel."""
+    fake = FakeRuntime(
+        modules=("google.colab",),
+        unroutable=("https://x.trycloudflare.com",),
+        tick=3.0,
+    )
+
+    with pytest.raises(RuntimeError, match="could not route any of them"):
+        start_studio(runtime=fake.build())
+
+    assert len(fake.tunnels) == 3
+    assert all(tunnel.killed for tunnel in fake.tunnels)
+    assert fake.rendered == []
+    assert _session._state is None
+    assert fake.logging_restored == 1
+
+
+def test_start_studio_waits_between_tunnel_attempts():
+    fake = FakeRuntime(
+        modules=("google.colab",),
+        unroutable=("https://x.trycloudflare.com",),
+        tick=3.0,
+    )
+
+    with pytest.raises(RuntimeError):
+        start_studio(runtime=fake.build())
+
+    assert fake.sleeps.count(2.0) == 2  # paused between attempts, not after the last
+
+
+def test_start_studio_reports_what_stopped_the_tunnel():
+    """Not every failure is rate limiting; Kaggle without internet cannot download cloudflared."""
+    fake = FakeRuntime(
+        modules=("google.colab",), tunnel_error=OSError("cloudflared download failed")
+    )
+
+    with pytest.raises(RuntimeError, match="could not be opened: cloudflared download failed"):
+        start_studio(runtime=fake.build())
+
+    assert _session._state is None
+
+
+def test_start_studio_tunnels_to_the_port_the_server_reports():
+    """The server resolves the port again itself and moves off a busy one silently."""
+    fake = FakeRuntime(modules=("google.colab",), api_url="http://127.0.0.1:51999")
+
+    start_studio(runtime=fake.build())
+
+    assert fake.server_calls[0]["port"] == 2024
+    assert fake.opened_tunnel_ports == [51999]
+
+
+def test_start_studio_falls_back_to_the_port_it_asked_for():
+    fake = FakeRuntime(modules=("google.colab",), api_url="http://127.0.0.1")
+
+    start_studio(runtime=fake.build())
+
+    assert fake.opened_tunnel_ports == [2024]
+
+
+def test_start_studio_keeps_a_new_tunnel_this_host_cannot_reach_itself():
+    """A new hostname can lag in the kernel's resolver while the browser has it."""
+    fake = FakeRuntime(
+        modules=("google.colab",),
+        unreachable=("https://x.trycloudflare.com",),
+        tick=3.0,
+    )
+
+    session = start_studio(runtime=fake.build())
+
+    assert session.api_url == "https://x.trycloudflare.com"
+    assert len(fake.tunnels) == 1
+    assert fake.tunnels[0].killed is False
+
+
+def test_restart_keeps_a_tunnel_this_host_could_never_reach():
+    """Silence condemns only a tunnel this host has reached before."""
+    fake = FakeRuntime(
+        modules=("google.colab",),
+        unreachable=("https://x.trycloudflare.com",),
+        tick=3.0,
+    )
+    runtime = fake.build()
+
+    start_studio(runtime=runtime)
+    session = start_studio(runtime=runtime)
+
+    assert len(fake.tunnels) == 1
+    assert session.api_url == "https://x.trycloudflare.com"
+
+
+def test_restart_replaces_an_unconfirmed_tunnel_that_cloudflare_disowns():
+    """Once something answers for it, the answer decides."""
+    fake = FakeRuntime(
+        modules=("google.colab",),
+        tunnel_urls=["https://first.trycloudflare.com", "https://second.trycloudflare.com"],
+        unreachable=("https://first.trycloudflare.com",),
+        tick=3.0,
+    )
+    runtime = fake.build()
+
+    start_studio(runtime=runtime)
+    fake.unreachable = ()
+    fake.unroutable = ("https://first.trycloudflare.com",)
+    session = start_studio(runtime=runtime)
+
+    assert fake.tunnels[0].killed is True
+    assert session.api_url == "https://second.trycloudflare.com"

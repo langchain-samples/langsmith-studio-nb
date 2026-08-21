@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from http import HTTPStatus
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
@@ -11,7 +12,7 @@ if TYPE_CHECKING:
 from langsmith_studio_nb._environment import detect_environment, needs_tunnel
 from langsmith_studio_nb._ports import resolve_port
 from langsmith_studio_nb._runtime import Runtime, TunnelProcess, Worker
-from langsmith_studio_nb._urls import studio_url
+from langsmith_studio_nb._urls import port_of, studio_url
 
 DEFAULT_GRAPH_NAME = "agent"
 DEFAULT_HOST = "127.0.0.1"
@@ -26,9 +27,19 @@ TUNNEL_FAILED = (
     "which notebook hosts share, so this usually clears on its own: wait a minute and "
     "re-run this cell. Pass verbose=True to see what cloudflared reported."
 )
+TUNNEL_ERROR = "The tunnel could not be opened: "
+TUNNEL_UNREACHABLE = (
+    "Opened {attempts} tunnels and Cloudflare could not route any of them to this "
+    "server, so Studio would not have reached it either. Quick tunnels are best "
+    "effort and some come up dead. Wait a minute and re-run this cell."
+)
 
+_API_URL_VARIABLE = "LANGGRAPH_API_URL"
 _POLL_INTERVAL = 0.5
 _JOIN_TIMEOUT = 20.0
+_TUNNEL_ATTEMPTS = 3
+_TUNNEL_READY_TIMEOUT = 10.0
+_TUNNEL_RETRY_PAUSE = 2.0
 
 
 class _Tunnel(NamedTuple):
@@ -38,6 +49,7 @@ class _Tunnel(NamedTuple):
     port: int
     requested: int  # what the caller asked for, so asking for another port opens another tunnel
     process: TunnelProcess
+    confirmed: bool  # this host reached it once, so silence from it now means something
 
 
 @dataclass(frozen=True)
@@ -77,34 +89,34 @@ def stop_studio(*, runtime: Runtime | None = None) -> None:
 
 
 def _stop(*, keep_tunnel: bool) -> _Tunnel | None:
-    """Stop owned resources, optionally returning the tunnel kept for a restart."""
-    global _state  # noqa: PLW0603 - one owned session per kernel
+    """Stop owned resources, optionally returning the tunnel kept for a restart.
+
+    Releases what it can and never raises: this is the only path that kills the
+    tunnel and restores logging, so a server that will not stop must not take
+    them down with it.
+    """
+    global _state
 
     if _state is None:
         return None
 
-    state = _state
+    state, _state = _state, None
     state.worker.stop()
+    # A server draining a long request outlives the join, but gives up its port
+    # as it starts shutting down, so the tunnel is still worth keeping: whether
+    # the replacement lands on that port is settled once it reports one.
     state.worker.join(timeout=_JOIN_TIMEOUT)
-    if state.worker.is_alive():
-        message = (
-            f"The previous agent server did not stop within {_JOIN_TIMEOUT:g}s, "
-            "so a replacement was not started."
-        )
-        raise RuntimeError(message)
-
     kept = state.tunnel if keep_tunnel else None
     try:
-        if state.tunnel is not None and not keep_tunnel:
+        if state.tunnel is not None and kept is None:
             state.tunnel.process.kill()
     finally:
         state.restore_logging()
-        _state = None
     return kept
 
 
 def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
-    """Return the tunnel a restart can keep, if it still answers for `requested`.
+    """Return the tunnel a restart can keep, if it still serves `requested`.
 
     Ask the tunnel itself, while the server it forwards to is still up. A live
     `cloudflared` process proves nothing: Cloudflare drops a quick tunnel on its
@@ -113,7 +125,64 @@ def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
     """
     if _state is None or _state.tunnel is None or _state.tunnel.requested != requested:
         return None
-    return _state.tunnel if runtime.probe(f"{_state.tunnel.url}/ok") else None
+    tunnel = _state.tunnel
+    reached = _reached(tunnel.url, runtime=runtime)
+    if reached is not None:
+        return tunnel._replace(confirmed=True) if reached else None
+    # Nothing answered. Only a tunnel this host has reached before is condemned
+    # by that; one it never could is no worse off than when it was opened.
+    return None if tunnel.confirmed else tunnel
+
+
+def _answers(url: str, *, runtime: Runtime) -> bool:
+    """Report whether `url` serves the agent server right now."""
+    return runtime.status(f"{url}/ok") == HTTPStatus.OK
+
+
+def _reached(url: str, *, runtime: Runtime) -> bool | None:
+    """Report what `url` says: True the server, False something else, None nothing."""
+    status = runtime.status(f"{url}/ok")
+    return None if status is None else status == HTTPStatus.OK
+
+
+def _confirm_new_tunnel(url: str, *, runtime: Runtime) -> bool | None:
+    """Wait out DNS for a verdict on a tunnel just opened.
+
+    A tunnel that works answers the first time, so only a tunnel in doubt costs
+    the wait. Cloudflare answers for a tunnel it cannot route, and that one is
+    worth replacing, but silence is not a verdict: a new hostname can take
+    minutes to resolve here while the browser reaches it immediately, and
+    re-opening on that guess spends a tunnel against a rate limit the whole
+    notebook host shares.
+    """
+    deadline = runtime.now() + _TUNNEL_READY_TIMEOUT
+    verdict = None
+    while runtime.now() < deadline:
+        verdict = _reached(url, runtime=runtime)
+        if verdict:
+            return True
+        runtime.sleep(_POLL_INTERVAL)
+    return verdict
+
+
+def _open_verified_tunnel(*, port: int, requested: int, runtime: Runtime) -> _Tunnel:
+    """Open a tunnel that answers, or raise. Never returns an unreachable URL."""
+    for attempt in range(1, _TUNNEL_ATTEMPTS + 1):
+        try:
+            opened = runtime.open_tunnel(port)
+        except TimeoutError as error:
+            # Cloudflare withheld the URL, which is what rate limiting looks
+            # like. Another attempt spends another tunnel to be told the same.
+            raise RuntimeError(TUNNEL_FAILED) from error
+        except Exception as error:
+            raise RuntimeError(f"{TUNNEL_ERROR}{error}") from error
+        confirmed = _confirm_new_tunnel(opened.url, runtime=runtime)
+        if confirmed is not False:
+            return _Tunnel(opened.url, port, requested, opened.process, confirmed is True)
+        opened.process.kill()
+        if attempt < _TUNNEL_ATTEMPTS:
+            runtime.sleep(_TUNNEL_RETRY_PAUSE)
+    raise RuntimeError(TUNNEL_UNREACHABLE.format(attempts=_TUNNEL_ATTEMPTS))
 
 
 def _spawn_server(
@@ -125,6 +194,9 @@ def _spawn_server(
 ) -> tuple[Worker, Callable[[], None]]:
     """Spawn one local server and return it with its logging restorer."""
     restore_logging = runtime.quiet() if not verbose else lambda: None
+    # Whatever is there now belongs to a server that is gone, and reading it
+    # back would point this session at an endpoint it does not own.
+    runtime.environ.pop(_API_URL_VARIABLE, None)
     try:
         worker = runtime.spawn(
             lambda: runtime.run_server(
@@ -202,11 +274,6 @@ def start_studio(
             is_free=runtime.port_is_free,
             find_free=runtime.find_free_port,
         )
-        if reused is not None and reused.port != port:
-            # Something else took the port, so the tunnel now forwards to nothing.
-            reused.process.kill()
-            reused = None
-
         worker, restore_logging = _spawn_server(
             graphs=graphs, port=port, verbose=verbose, runtime=runtime
         )
@@ -216,41 +283,38 @@ def start_studio(
         raise
     _state = _SessionState(worker=worker, tunnel=reused, restore_logging=restore_logging)
     try:
-        local_api_url = f"http://{DEFAULT_HOST}:{port}"
-        _wait_for_server(worker, runtime=runtime, timeout=timeout, api_url=local_api_url)
-        api_url = local_api_url
+        api_url = _wait_for_server(worker, runtime=runtime, timeout=timeout)
+        # The server resolves the port again itself and moves off a busy one
+        # without saying so, so take the port it reports, not the one we asked for.
+        bound = port_of(api_url) or port
         if tunnel:
+            if reused is not None and reused.port != bound:
+                # The server moved; the tunnel still forwards to where it was.
+                reused.process.kill()
+                reused = None
             if reused is None:
-                try:
-                    opened = runtime.open_tunnel(port)
-                except Exception as error:
-                    raise RuntimeError(TUNNEL_FAILED) from error
-                reused = _Tunnel(opened.url, port, requested, opened.process)
-                _state = _SessionState(
-                    worker=worker, tunnel=reused, restore_logging=restore_logging
-                )
+                reused = _open_verified_tunnel(port=bound, requested=requested, runtime=runtime)
+            _state = replace(_state, tunnel=reused)
             api_url = reused.url
 
         url = studio_url(api_url, workspace_id=runtime.workspace_id())
         runtime.render(url, TUNNEL_HINT if tunnel else None)
         return StudioSession(api_url=api_url, studio_url=url, tunnel=tunnel, graphs=graphs)
-    except BaseException as error:
-        try:
-            _stop(keep_tunnel=False)
-        except RuntimeError as cleanup_error:
-            error.add_note(str(cleanup_error))
+    except BaseException:
+        _stop(keep_tunnel=False)
         raise
 
 
-def _wait_for_server(worker: Worker, *, runtime: Runtime, timeout: float, api_url: str) -> None:
-    """Return once the local server answers, or raise."""
+def _wait_for_server(worker: Worker, *, runtime: Runtime, timeout: float) -> str:
+    """Return the URL the server publishes for itself once it answers, or raise."""
     deadline = runtime.now() + timeout
     while runtime.now() < deadline:
         if not worker.is_alive():
             message = "The agent server stopped while starting up. Check the log above."
             raise RuntimeError(message)
-        if runtime.probe(f"{api_url}/ok"):
-            return
+        api_url = runtime.environ.get(_API_URL_VARIABLE)
+        if api_url and _answers(api_url, runtime=runtime):
+            return api_url
         runtime.sleep(_POLL_INTERVAL)
     message = (
         f"The agent server did not answer within {timeout:g}s. "

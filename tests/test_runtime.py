@@ -1,8 +1,10 @@
+import email.message
 import logging
 import socket
 import sys
 import threading
 import types
+import urllib.error
 import urllib.request
 
 import IPython.display
@@ -12,19 +14,18 @@ from langsmith_studio_nb import _runtime
 from langsmith_studio_nb._render import link_text
 from langsmith_studio_nb._runtime import (
     Runtime,
-    _request_server_exit,
-    _ThreadWorker,
+    capture_uvicorn_server,
     default_display_html,
     default_find_free_port,
     default_modules,
     default_namespace,
     default_open_tunnel,
     default_port_is_free,
-    default_probe,
     default_quiet,
     default_render,
     default_run_server,
     default_spawn,
+    default_status,
     default_workspace_id,
 )
 
@@ -70,18 +71,27 @@ def test_default_spawn_runs_the_target_off_thread():
     assert worker.is_alive() is False
 
 
-def test_default_spawn_stops_only_the_server_on_its_worker_thread():
-    class Server:
-        def __init__(self):
-            self.should_exit = False
+class FakeUvicornServer:
+    """Stands in for uvicorn's own server object, built the same way."""
 
-    Server.__module__ = "uvicorn.server"
-    owned = Server()
-    unowned = Server()
+    def __init__(self, config=None):
+        self.config = config
+        self.should_exit = False
+
+
+def _install_uvicorn(monkeypatch):
+    return _install_module(monkeypatch, "uvicorn", Server=FakeUvicornServer)
+
+
+def test_default_spawn_stops_the_server_its_thread_built(monkeypatch):
+    uvicorn = _install_uvicorn(monkeypatch)
+    built = []
+    unowned = FakeUvicornServer()
     started = threading.Event()
 
     def run_until_stopped():
-        server = owned
+        server = uvicorn.Server(config="ours")  # what uvicorn.run does
+        built.append(server)
         started.set()
         while not server.should_exit:
             threading.Event().wait(0.01)
@@ -91,20 +101,85 @@ def test_default_spawn_stops_only_the_server_on_its_worker_thread():
     worker.stop()
     worker.join(timeout=5)
 
-    assert owned.should_exit is True
+    assert built[0].should_exit is True
     assert unowned.should_exit is False
     assert worker.is_alive() is False
 
 
-def test_request_server_exit_is_safe_before_a_server_exists():
-    _request_server_exit(None)
+def test_thread_worker_stops_a_server_that_is_still_starting(monkeypatch):
+    """A stop must not slip past a server that has not been built yet."""
+    uvicorn = _install_uvicorn(monkeypatch)
+    stop_requested = threading.Event()
+    built = []
 
+    def build_late():
+        assert stop_requested.wait(5)
+        built.append(uvicorn.Server())
 
-def test_thread_worker_stop_is_safe_before_the_thread_has_an_identity(monkeypatch):
-    worker = object.__new__(_ThreadWorker)
-    monkeypatch.setattr(worker, "_thread", types.SimpleNamespace(ident=None), raising=False)
-
+    worker = default_spawn(build_late)
     worker.stop()
+    stop_requested.set()
+    worker.join(timeout=5)
+
+    assert built[0].should_exit is True
+
+
+def test_thread_worker_join_keeps_waiting_for_a_running_thread(monkeypatch):
+    _install_uvicorn(monkeypatch)
+    release = threading.Event()
+
+    def wait_for_release() -> None:
+        release.wait(5)
+
+    worker = default_spawn(wait_for_release)
+    worker.join(timeout=0.01)
+
+    assert worker.is_alive() is True
+
+    release.set()
+    worker.join(timeout=5)
+
+    assert worker.is_alive() is False
+
+
+def test_thread_worker_stop_is_safe_when_no_server_is_ever_built(monkeypatch):
+    _install_uvicorn(monkeypatch)
+
+    worker = default_spawn(lambda: None)
+    worker.join(timeout=5)
+    worker.stop()
+
+    assert worker.is_alive() is False
+
+
+def test_capture_uvicorn_server_restores_uvicorn_after_one_server(monkeypatch):
+    uvicorn = _install_uvicorn(monkeypatch)
+    original = uvicorn.Server.__init__
+    captured = []
+
+    capture_uvicorn_server(captured.append)
+    first = uvicorn.Server()
+
+    assert captured == [first]
+    assert uvicorn.Server.__init__ is original
+
+    uvicorn.Server()
+
+    assert captured == [first]
+
+
+def test_capture_uvicorn_server_undo_removes_the_hook(monkeypatch):
+    uvicorn = _install_uvicorn(monkeypatch)
+    original = uvicorn.Server.__init__
+    captured = []
+
+    undo = capture_uvicorn_server(captured.append)
+    undo()
+    undo()  # idempotent: the hook is already gone
+    uvicorn.Server()
+
+    assert captured == []
+    assert uvicorn.Server.__init__ is original
 
 
 def test_default_open_tunnel_returns_the_url_and_exact_process(monkeypatch):
@@ -158,20 +233,33 @@ def test_default_open_tunnel_kills_its_process_when_startup_fails(monkeypatch):
     assert process.killed is True
 
 
-@pytest.mark.parametrize(("status", "expected"), [(200, True), (503, False)])
-def test_default_probe(monkeypatch, status, expected):
+@pytest.mark.parametrize("status", [200, 503])
+def test_default_status(monkeypatch, status):
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: FakeResponse(status))
 
-    assert default_probe("http://127.0.0.1:2024/ok") is expected
+    assert default_status("http://127.0.0.1:2024/ok") == status
 
 
-def test_default_probe_when_the_server_is_not_listening(monkeypatch):
+def test_default_status_reports_an_http_error_as_a_status(monkeypatch):
+    """Cloudflare answering 530 for a dead tunnel is a verdict, not a failure to reach."""
+
+    def error(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            "https://x.trycloudflare.com/ok", 530, "", email.message.Message(), None
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", error)
+
+    assert default_status("https://x.trycloudflare.com/ok") == 530
+
+
+def test_default_status_when_nothing_answers(monkeypatch):
     def refuse(*args, **kwargs):
         raise OSError("connection refused")
 
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
 
-    assert default_probe("http://127.0.0.1:2024/ok") is False
+    assert default_status("http://127.0.0.1:2024/ok") is None
 
 
 def _langsmith_client(sessions):
@@ -300,7 +388,7 @@ def test_runtime_defaults_are_the_real_implementations():
 
     assert runtime.run_server is default_run_server
     assert runtime.open_tunnel is default_open_tunnel
-    assert runtime.probe is default_probe
+    assert runtime.status is default_status
     assert runtime.port_is_free is default_port_is_free
     assert runtime.find_free_port is default_find_free_port
     assert runtime.environ is not None
