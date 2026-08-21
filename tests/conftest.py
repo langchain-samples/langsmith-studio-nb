@@ -50,13 +50,17 @@ class FakeRuntime:
         namespace: dict[str, Any] | None = None,
         environ: dict[str, str] | None = None,
         modules: tuple[str, ...] = (),
-        probes: list[bool] | None = None,
+        statuses: list[int | None] | None = None,
+        unroutable: tuple[str, ...] = (),
         unreachable: tuple[str, ...] = (),
         worker: FakeWorker | None = None,
         spawn_error: Exception | None = None,
         workspace_id: str | None = "ws-1",
         tunnel_url: str = "https://x.trycloudflare.com",
+        tunnel_urls: list[str] | None = None,
         tunnel_error: Exception | None = None,
+        api_url: str | None = None,
+        publishes_url: bool = True,
         port_is_free: bool = True,
         free_port: int = 51234,
         tick: float = 0.1,
@@ -64,13 +68,17 @@ class FakeRuntime:
         self.namespace_value = {"agent": object()} if namespace is None else namespace
         self.environ = dict(environ or {})
         self.modules_value = modules
-        self.probes = probes
+        self.statuses = statuses
+        self.unroutable = unroutable
         self.unreachable = unreachable
         self.worker = worker or FakeWorker()
         self.spawn_error = spawn_error
         self.workspace_id_value = workspace_id
         self.tunnel_url = tunnel_url
+        self.tunnel_urls = tunnel_urls
         self.tunnel_error = tunnel_error
+        self.api_url = api_url
+        self.publishes_url = publishes_url
         self.port_is_free_value = port_is_free
         self.free_port = free_port
         self.tick = tick
@@ -87,6 +95,8 @@ class FakeRuntime:
 
     def run_server(self, **kwargs: Any) -> None:
         self.server_calls.append(kwargs)
+        if self.publishes_url:  # the real server publishes the URL it bound
+            self.environ["LANGGRAPH_API_URL"] = self.api_url or f"http://127.0.0.1:{kwargs['port']}"
 
     def spawn(self, target: Any) -> FakeWorker:
         if self.spawn_error is not None:
@@ -101,16 +111,22 @@ class FakeRuntime:
         if self.tunnel_error is not None:
             raise self.tunnel_error
         process = FakeTunnelProcess()
+        url = self.tunnel_url
+        if self.tunnel_urls:
+            url = self.tunnel_urls[min(len(self.tunnels), len(self.tunnel_urls) - 1)]
         self.tunnels.append(process)
-        return OpenedTunnel(url=self.tunnel_url, process=process)
+        return OpenedTunnel(url=url, process=process)
 
-    def probe(self, url: str) -> bool:
+    def status(self, url: str) -> int | None:
+        """Report a status the way the real one does: None means nothing answered."""
         self.probed.append(url)
+        if any(url.startswith(prefix) for prefix in self.unroutable):
+            return 530  # Cloudflare answering for a tunnel it cannot route
         if any(url.startswith(prefix) for prefix in self.unreachable):
-            return False
-        if self.probes is None:
-            return True
-        return self.probes.pop(0) if self.probes else False
+            return None
+        if self.statuses is None:
+            return 200
+        return self.statuses.pop(0) if self.statuses else None
 
     def now(self) -> float:
         self.clock += self.tick
@@ -135,7 +151,7 @@ class FakeRuntime:
             run_server=self.run_server,
             spawn=self.spawn,
             open_tunnel=self.open_tunnel,
-            probe=self.probe,
+            status=self.status,
             port_is_free=lambda _port: self.port_is_free_value,
             find_free_port=lambda: self.free_port,
             workspace_id=lambda: self.workspace_id_value,

@@ -8,14 +8,13 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, MutableMapping
-    from types import FrameType
 
 from langsmith_studio_nb._logging import silence_loggers
 from langsmith_studio_nb._render import link_html, link_text
@@ -60,32 +59,47 @@ def default_run_server(**kwargs: Any) -> None:  # noqa: ANN401 - forwards run_se
     run_server(**kwargs)
 
 
-def _is_uvicorn_server(candidate: Any) -> bool:  # noqa: ANN401 - scans frame locals
-    """Report whether `candidate` is Uvicorn's server object."""
-    kind = type(candidate)
-    return (
-        kind.__name__ == "Server"
-        and kind.__module__.split(".")[0] == "uvicorn"
-        and hasattr(candidate, "should_exit")
-    )
+def capture_uvicorn_server(sink: Callable[[Any], None]) -> Callable[[], None]:
+    """Hand `sink` the next Uvicorn server built in this process. Returns an undo.
 
+    `run_server` owns `uvicorn.run`, which builds the server and blocks, so the
+    only handle on it is the one taken as it is constructed. Do not go looking
+    for the object instead: a search of the kernel finds servers this session
+    does not own, and one over `sys._current_frames()` races the frames it walks.
+    """
+    import uvicorn  # noqa: PLC0415 - imported by the server, not by this package
 
-def _request_server_exit(frame: FrameType | None) -> None:
-    """Stop the Uvicorn server owned by one worker thread, if it has started."""
-    while frame is not None:
-        for candidate in frame.f_locals.values():
-            if _is_uvicorn_server(candidate):
-                candidate.should_exit = True
-                return
-        frame = frame.f_back
+    original = uvicorn.Server.__init__
+
+    def capture(server: Any, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401 - forwards uvicorn's own arguments
+        original(server, *args, **kwargs)
+        uvicorn.Server.__init__ = original  # one server per session; take the first
+        sink(server)
+
+    uvicorn.Server.__init__ = capture
+
+    def undo() -> None:
+        if uvicorn.Server.__init__ is capture:
+            uvicorn.Server.__init__ = original
+
+    return undo
 
 
 class _ThreadWorker:
-    """A worker that can stop only the Uvicorn server on its own thread."""
+    """A worker that stops the one Uvicorn server it started."""
 
     def __init__(self, target: Callable[[], None]) -> None:
+        self._server: Any = None
+        self._stopping = False
+        self._undo_capture = capture_uvicorn_server(self._captured)
         self._thread = threading.Thread(target=target, daemon=True)
         self._thread.start()
+
+    def _captured(self, server: Any) -> None:  # noqa: ANN401 - uvicorn's server object
+        self._server = server
+        if self._stopping:
+            # Asked to stop before the server existed; it exits as it comes up.
+            server.should_exit = True
 
     def is_alive(self) -> bool:
         """Report whether the worker thread is running."""
@@ -94,12 +108,19 @@ class _ThreadWorker:
     def join(self, timeout: float | None = None) -> None:
         """Wait for the worker thread to finish."""
         self._thread.join(timeout)
+        if not self._thread.is_alive():
+            # The thread ended without building a server, so none is coming.
+            self._undo_capture()
 
     def stop(self) -> None:
-        """Ask this thread's Uvicorn server to exit."""
-        ident = self._thread.ident
-        if ident is not None:
-            _request_server_exit(sys._current_frames().get(ident))
+        """Ask this worker's Uvicorn server to exit.
+
+        Leaves the capture in place when the server is not up yet: `_captured`
+        stops it on arrival, so a stop cannot slip past a starting server.
+        """
+        self._stopping = True
+        if self._server is not None:
+            self._server.should_exit = True
 
 
 def default_spawn(target: Callable[[], None]) -> Worker:
@@ -122,13 +143,20 @@ def default_open_tunnel(port: int, *, timeout: float = 30.0) -> OpenedTunnel:
     return OpenedTunnel(url=url, process=tunnel.process)
 
 
-def default_probe(url: str, *, timeout: float = 5.0) -> bool:
-    """Report whether `url` answers with 200."""
+def default_status(url: str, *, timeout: float = 5.0) -> int | None:
+    """Return the status `url` answers with, or None when nothing answered.
+
+    The difference matters for a tunnel: an error from Cloudflare means the
+    tunnel is routed to nothing, while no answer at all means only that this
+    host could not reach it.
+    """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - URL comes from the server we started
-            return bool(response.status == HTTPStatus.OK)
+            return int(response.status)
+    except urllib.error.HTTPError as error:  # a status, not a failure to reach
+        return int(error.code)
     except OSError:
-        return False
+        return None
 
 
 def default_port_is_free(port: int, *, host: str = "127.0.0.1") -> bool:
@@ -203,7 +231,7 @@ class Runtime:
     run_server: Callable[..., None] = default_run_server
     spawn: Callable[[Callable[[], None]], Worker] = default_spawn
     open_tunnel: Callable[[int], OpenedTunnel] = default_open_tunnel
-    probe: Callable[[str], bool] = default_probe
+    status: Callable[[str], int | None] = default_status
     port_is_free: Callable[[int], bool] = default_port_is_free
     find_free_port: Callable[[], int] = default_find_free_port
     workspace_id: Callable[[], str | None] = default_workspace_id
