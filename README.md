@@ -29,12 +29,14 @@ Requires Python 3.11+. `langgraph-cli[inmem]` comes with it, so this is the only
 ```python
 import os
 
-from langsmith_studio_nb import load_secret
+from google.colab import userdata
 
-load_secret("OPENAI_API_KEY")  # Colab and Kaggle: from their secret stores
-load_secret("LANGSMITH_API_KEY")  # elsewhere: from the environment
+os.environ["OPENAI_API_KEY"] = userdata.get("OPENAI_API_KEY")
+os.environ["LANGSMITH_API_KEY"] = userdata.get("LANGSMITH_API_KEY")
 os.environ["LANGSMITH_TRACING"] = "true"
 ```
+
+Add both keys under the 🔑 **Secrets** panel in Colab's left sidebar, with **Notebook access** on.
 
 ```python
 from deepagents import create_deep_agent
@@ -63,14 +65,10 @@ Edit the agent and re-run the last two cells to pick up your changes. `start_stu
 ## Example notebook
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/langchain-samples/langsmith-studio-nb/blob/main/examples/deep_agent_in_studio.ipynb)
-[![Open in Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/langchain-samples/langsmith-studio-nb/HEAD?labpath=examples%2Fdeep_agent_in_studio.ipynb)
-[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/langchain-samples/langsmith-studio-nb/blob/main/examples/deep_agent_in_studio.ipynb)
 
-[**examples/deep_agent_in_studio.ipynb**](examples/deep_agent_in_studio.ipynb) is the quickstart above as a runnable notebook, plus the two things a hosted runtime adds: where to keep your API keys on each host, and the one Studio setting a tunnel needs. It runs top to bottom on Colab, Kaggle, Binder, or local Jupyter.
+[**examples/deep_agent_in_studio.ipynb**](examples/deep_agent_in_studio.ipynb) is the quickstart above as a runnable notebook, plus the two things Colab adds: where to keep your API keys, and the one Studio setting a tunnel needs. It runs top to bottom there, and in your own Jupyter.
 
-`load_secret` finds the keys. Locally and on Binder they come from a `.env` file, which you make with `cd examples && cp .env.example .env`. On Colab and Kaggle they come from the host's own store. The template sits beside the notebook, because the keys belong to the example rather than to the package.
-
-Everything Binder needs lives in [`.binder/`](.binder), and all of it serves the example. The package declares its own dependencies in `pyproject.toml` and needs none of it. `requirements.txt` there adds the agent stack the notebook imports. `runtime.txt` pins the Python version that stack supports. `postBuild` lets JupyterLab see dotfiles, so a reader can create the `.env`. Each file says why in a comment. Keep the `.` line in `requirements.txt`: it is what installs this package from the commit Binder launched.
+The keys come from Colab's 🔑 Secrets panel. Running your own Jupyter, they come from the environment, or from a `.env` file beside the notebook, which you make with `cd examples && cp .env.example .env`. The template sits next to the notebook, because the keys belong to the example rather than to the package.
 
 ## Several agents at once
 
@@ -84,21 +82,11 @@ One server, one tunnel, one link. Studio switches between the graphs without a r
 
 ## Where it works
 
-`start_studio` tunnels only when the browser cannot reach the kernel directly.
+Colab, and your own Jupyter. They differ in one thing.
 
-| Environment | Detected by | Tunnel |
-| --- | --- | --- |
-| Google Colab | `google.colab` imported | yes |
-| Kaggle | `KAGGLE_*` variables | yes |
-| Binder | `BINDER_*` variables | yes, but see below |
-| JupyterHub | `JUPYTERHUB_*` variables | yes |
-| Local Jupyter, JupyterLab, VS Code | default | no |
+On Colab the kernel runs on Google's machine, so the browser cannot reach it and `start_studio` opens a Cloudflare quick tunnel to carry Studio's requests. The `cloudflared` binary downloads itself the first time. In Jupyter, JupyterLab, or VS Code on your own machine, the browser is already there, so it serves `http://127.0.0.1:2024` and skips the tunnel.
 
-Tunnels use a Cloudflare quick tunnel. The `cloudflared` binary downloads itself on first use.
-
-**mybinder.org cannot tunnel.** Its network policy allows outbound TCP on ports 80, 443, 873, 1094, 1095, 4001, 9418 and 16286 only, and no UDP to the internet at all, while a tunnel needs port 7844 — UDP for the default protocol, TCP for `http2`. Cloudflare still issues a URL, since that request goes over 443, so the failure looks like a working link until Studio tries to use it; `start_studio` raises instead. The port list is [`binderhub.networkPolicy.egress.tcpPorts`](https://github.com/jupyterhub/mybinder.org-deploy/blob/main/mybinder/values.yaml) in mybinder.org's deployment, so it is theirs to change, not yours. A BinderHub you run yourself can add 7844 there.
-
-Override the choice when the guess is wrong:
+Override that when the guess is wrong:
 
 ```python
 start_studio(tunnel=True)  # e.g. a browser that blocks https -> localhost
@@ -117,23 +105,6 @@ Pass `verbose=True` to see the agent server's logs. Raises `NameError` if a vari
 
 Stops the running server and its tunnel, and puts the log levels back. Safe to call when nothing is running, and it never raises. A server draining a long request can outlive the wait, and it gives up the tunnel and restores the log levels either way. Use it to force the next `start_studio` onto a fresh tunnel.
 
-### `load_secret(name, *, required=True)`
-
-Puts `name` into `os.environ` and returns it, taken from whichever secret store the host has. It reads the environment first, so an exported variable wins over the store. So does one that `python-dotenv` has already loaded from a `.env`:
-
-```python
-from dotenv import load_dotenv
-
-from langsmith_studio_nb import load_secret
-
-load_dotenv()  # local and Binder: a .env file
-load_secret("OPENAI_API_KEY")  # Colab: userdata. Kaggle: UserSecretsClient.
-```
-
-Only Colab and Kaggle have a store to ask. Everywhere else the environment is all there is. It writes into the environment because that is where the model and tracing SDKs go looking for a key. When it cannot find the secret it raises `RuntimeError` naming the fix for the host it detected, or returns `None` if you passed `required=False`. It never prints or logs the value.
-
-Two things it deliberately does not do. It does not read `.env` itself, because `load_dotenv` already does that well and calling it first works fine. It does not prompt on stdin, because a library that blocks on input is painful in scripts and in CI.
-
 ### `Runtime`
 
 Every side effect the package performs, in one injectable frozen dataclass. Substitute it in tests:
@@ -148,13 +119,12 @@ start_studio(runtime=Runtime(status=lambda url: 200))
 
 - **No IPython dependency.** The package uses whatever IPython your notebook already has, so installing it will not upgrade Colab's pinned `ipython==7.34.0` out from under `google-colab`.
 - **Studio must trust the tunnel domain.** On first connect, Studio blocks hosts it does not know. Add `*.trycloudflare.com` under Advanced Settings → Allowed Domains. Use the wildcard, not the exact host Studio offers to add for you, because that hostname changes every time a tunnel opens. The list lives in your browser's local storage, so it is per user and per browser, and there is no workspace-level setting. `start_studio` prints this reminder whenever it tunnels.
-- **Restarting keeps the tunnel.** Cloudflare rate limits quick tunnels per IP address (`error code: 1015`, `429 Too Many Requests`), and every notebook on a host shares that address. A demo that restarts a few times can stop getting tunnels for a while. So a restart on the same port reuses the tunnel already running. The link does not change, and the restart takes about a second instead of five. Before reusing one, `start_studio` asks cloudflared whether it still holds a connection to Cloudflare. The process keeps running behind a URL that has stopped working when Cloudflare drops a quick tunnel, so a dead one gets replaced rather than handed back to you. `stop_studio()` gives the tunnel up, and the next `start_studio()` opens a fresh one.
+- **Restarting keeps the tunnel.** Cloudflare rate limits quick tunnels per IP address (`error code: 1015`, `429 Too Many Requests`), and every notebook on a Colab host shares that address. A demo that restarts a few times can stop getting tunnels for a while. So a restart on the same port reuses the tunnel already running. The link does not change, and the restart takes about a second instead of five. Before reusing one, `start_studio` asks cloudflared whether it still holds a connection to Cloudflare. The process keeps running behind a URL that has stopped working when Cloudflare drops a quick tunnel, so a dead one gets replaced rather than handed back to you. `stop_studio()` gives the tunnel up, and the next `start_studio()` opens a fresh one.
 - **A failed tunnel is an error, not a link.** When `cloudflared` reports no URL, `start_studio` stops the local server and raises, rather than printing a link that can only fail to fetch.
-- **`start_studio` replaces a tunnel that never connects.** cloudflared prints a `trycloudflare.com` URL as soon as Cloudflare assigns one, before it holds a connection to carry the traffic — and on a host that blocks its egress it never gets one, retrying forever behind a URL that answers for nobody. `start_studio` asks cloudflared itself, through `/ready` on its metrics server, and opens another tunnel if this one never connects. The second attempt asks for `--protocol http2`, which reaches port 7844 over TCP instead of the UDP the default needs — some hosts drop one and not the other. After three it raises instead of printing a link that cannot work — every attempt spends a quick tunnel against the rate limit, so the count stays small.
+- **`start_studio` replaces a tunnel that never connects.** cloudflared prints a `trycloudflare.com` URL as soon as Cloudflare assigns one, before it holds a connection to carry the traffic — and on a runtime that blocks its egress it never gets one, retrying forever behind a URL that answers for nobody. `start_studio` asks cloudflared itself, through `/ready` on its metrics server, and opens another tunnel if this one never connects. The second attempt asks for `--protocol http2`, which reaches port 7844 over TCP instead of the UDP the default needs — a runtime may drop one and not the other. After three it raises instead of printing a link that cannot work — every attempt spends a quick tunnel against the rate limit, so the count stays small.
 - **A tunnel URL is public and unauthenticated** for as long as the cell runs. Fine for a demo agent. Think twice with anything sensitive. The tunnel dies with the kernel.
 - **Edits need a restart.** The server registers the graph object when it boots, so re-run `start_studio()` after changing your agent. Hot reload is not available from a notebook.
 - **Colab drops idle runtimes** after roughly 90 minutes. You get a new tunnel URL after reconnecting.
-- **Kaggle needs internet enabled** in the notebook settings, otherwise the tunnel cannot start.
 
 ## Development
 

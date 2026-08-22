@@ -49,7 +49,7 @@ class FakeRuntime:
         *,
         namespace: dict[str, Any] | None = None,
         environ: dict[str, str] | None = None,
-        modules: tuple[str, ...] = (),
+        in_colab: bool = False,
         statuses: list[int | None] | None = None,
         unroutable: tuple[str, ...] = (),
         unreachable: tuple[str, ...] = (),
@@ -68,7 +68,7 @@ class FakeRuntime:
     ) -> None:
         self.namespace_value = {"agent": object()} if namespace is None else namespace
         self.environ = dict(environ or {})
-        self.modules_value = modules
+        self.in_colab_value = in_colab
         self.statuses = statuses
         self.unroutable = unroutable
         self.unreachable = unreachable
@@ -176,7 +176,7 @@ class FakeRuntime:
             find_free_port=lambda: self.free_port,
             workspace_id=lambda: self.workspace_id_value,
             namespace=lambda: self.namespace_value,
-            modules=lambda: self.modules_value,
+            in_colab=lambda: self.in_colab_value,
             render=self.render,
             quiet=self.quiet,
             sleep=self.sleep,

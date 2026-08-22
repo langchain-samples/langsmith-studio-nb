@@ -9,13 +9,11 @@ from typing import TYPE_CHECKING, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from langsmith_studio_nb._environment import detect_environment, needs_tunnel
-from langsmith_studio_nb._ports import resolve_port
+from langsmith_studio_nb._ports import LOOPBACK, resolve_port
 from langsmith_studio_nb._runtime import OpenedTunnel, Runtime, TunnelProcess, Worker
 from langsmith_studio_nb._urls import port_of, studio_url
 
 DEFAULT_GRAPH_NAME = "agent"
-DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 2024
 DEFAULT_TIMEOUT = 180.0
 TUNNEL_HINT = (
@@ -24,17 +22,18 @@ TUNNEL_HINT = (
 TUNNEL_FAILED = (
     "The tunnel never came up, so the server is reachable only from this kernel and "
     "Studio cannot connect to it. Cloudflare rate limits quick tunnels per IP address, "
-    "which notebook hosts share, so this usually clears on its own. Wait a minute and "
-    "re-run this cell. Pass verbose=True to see what cloudflared reported."
+    "which every notebook on a Colab host shares, so this usually clears on its own. "
+    "Wait a minute and re-run this cell. Pass verbose=True to see what cloudflared "
+    "reported."
 )
 TUNNEL_ERROR = "The tunnel could not be opened: "
 TUNNEL_UNREACHABLE = (
     "Opened {attempts} tunnels and cloudflared never reached Cloudflare with any of "
     "them, so their URLs answer for nobody and Studio could not have connected. A "
-    "tunnel needs port 7844 out of this host — UDP for the default protocol, TCP for "
-    "the http2 one this also tried — and notebook hosts often allow neither. Binder "
-    "allows TCP 80, 443, 873, 1094, 1095, 4001, 9418 and 16286, and no UDP at all, so "
-    "no quick tunnel can work there. Pass verbose=True to see what cloudflared reported."
+    "tunnel needs port 7844 out of this runtime, UDP for the default protocol and TCP "
+    "for the http2 one this also tried, and some runtimes allow neither. Runtime "
+    "\N{RIGHTWARDS ARROW} Disconnect and delete runtime, then reconnect, usually lands "
+    "on one that does. Pass verbose=True to see what cloudflared reported."
 )
 
 _API_URL_VARIABLE = "LANGGRAPH_API_URL"
@@ -86,9 +85,8 @@ class StudioSession:
         return ""
 
 
-def stop_studio(*, runtime: Runtime | None = None) -> None:
+def stop_studio() -> None:
     """Stop a running agent server and its tunnel. Safe to call when none is running."""
-    _ = runtime  # unused, but injected test runtimes pass one
     _stop(keep_tunnel=False)
 
 
@@ -162,10 +160,10 @@ def _wait_for_tunnel(opened: OpenedTunnel, *, runtime: Runtime) -> bool:
 def _open_verified_tunnel(*, port: int, requested: int, runtime: Runtime) -> _Tunnel:
     """Open a tunnel that is connected to Cloudflare, or raise.
 
-    Every attempt spends a quick tunnel against a rate limit the whole notebook
-    host shares, so the count is small and the protocol changes with it: the
-    default reaches the edge over UDP, which some hosts drop outright, and
-    `http2` reaches the same port over TCP, which fewer of them do.
+    Every attempt spends a quick tunnel against a rate limit every notebook on
+    this host shares, so the count is small and the protocol changes with it:
+    the default reaches the edge over UDP, which some runtimes drop outright,
+    and `http2` reaches the same port over TCP, which fewer of them do.
     """
     for attempt in range(1, _TUNNEL_ATTEMPTS + 1):
         try:
@@ -199,7 +197,7 @@ def _spawn_server(
     try:
         worker = runtime.spawn(
             lambda: runtime.run_server(
-                host=DEFAULT_HOST,
+                host=LOOPBACK,
                 port=port,
                 graphs={name: f"__main__:{name}" for name in graphs},
                 tunnel=False,
@@ -234,8 +232,8 @@ def start_studio(
         variables: Names of the compiled graphs in the notebook namespace.
             Defaults to `agent`.
         port: Port to serve on. If it is busy, this picks a free one instead.
-        tunnel: Force a public tunnel on or off. Defaults to whether the
-            notebook host runs the kernel away from the browser.
+        tunnel: Force a public tunnel on or off. Defaults to on under Colab,
+            whose kernel the browser cannot reach directly, and off elsewhere.
         timeout: Seconds to wait for the server to answer before giving up.
         verbose: Show the server's own logs, which a notebook cannot scroll.
         runtime: Injected side effects. Tests substitute this.
@@ -260,12 +258,13 @@ def start_studio(
         raise NameError(message)
 
     if tunnel is None:
-        environment = detect_environment(modules=runtime.modules(), environ=runtime.environ)
-        tunnel = needs_tunnel(environment)
+        # Studio runs in the browser, so it can only reach localhost when the
+        # kernel is on the same machine.
+        tunnel = runtime.in_colab()
 
     requested = port
-    reused = _reusable_tunnel(requested=requested, runtime=runtime) if tunnel else None
-    reused = _stop(keep_tunnel=reused is not None)
+    worth_keeping = _reusable_tunnel(requested=requested, runtime=runtime) if tunnel else None
+    reused = _stop(keep_tunnel=worth_keeping is not None)
     try:
         # The tunnel forwards to the port we opened it on, so a restart goes back there.
         port = resolve_port(

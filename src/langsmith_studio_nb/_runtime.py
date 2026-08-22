@@ -18,13 +18,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Container, MutableMapping
+    from collections.abc import Callable, MutableMapping
 
-from langsmith_studio_nb._environment import NotebookEnvironment, detect_environment
 from langsmith_studio_nb._logging import TUNNEL_LOGGER, silence_loggers
+from langsmith_studio_nb._ports import LOOPBACK
 from langsmith_studio_nb._render import link_html, link_text
 
-DEFAULT_TUNNEL_HOST = "127.0.0.1"
 _TUNNEL_URL = re.compile(r"(https://[A-Za-z0-9.-]+\.trycloudflare\.com)")
 
 tunnel_logger = logging.getLogger(TUNNEL_LOGGER)
@@ -169,9 +168,9 @@ def default_open_tunnel(
         str(ensure_cloudflared()),
         "tunnel",
         "--url",
-        f"http://{DEFAULT_TUNNEL_HOST}:{port}",
+        f"http://{LOOPBACK}:{port}",
         "--metrics",
-        f"{DEFAULT_TUNNEL_HOST}:{metrics_port}",
+        f"{LOOPBACK}:{metrics_port}",
     ]
     if protocol is not None:
         command += ["--protocol", protocol]
@@ -186,7 +185,7 @@ def default_open_tunnel(
         return OpenedTunnel(
             url=url.result(timeout=timeout),
             process=process,
-            ready_url=f"http://{DEFAULT_TUNNEL_HOST}:{metrics_port}/ready",
+            ready_url=f"http://{LOOPBACK}:{metrics_port}/ready",
         )
     except BaseException:
         process.kill()
@@ -209,7 +208,7 @@ def default_status(url: str, *, timeout: float = 5.0) -> int | None:
         return None
 
 
-def default_port_is_free(port: int, *, host: str = "127.0.0.1") -> bool:
+def default_port_is_free(port: int, *, host: str = LOOPBACK) -> bool:
     """Report whether `port` can be bound on `host`."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         # Matches the server's own check. Without it, a port still in TIME_WAIT
@@ -222,7 +221,7 @@ def default_port_is_free(port: int, *, host: str = "127.0.0.1") -> bool:
         return True
 
 
-def default_find_free_port(*, host: str = "127.0.0.1") -> int:
+def default_find_free_port(*, host: str = LOOPBACK) -> int:
     """Return a port nothing is listening on."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
@@ -243,54 +242,18 @@ def default_workspace_id() -> str | None:
     return sessions[0]["tenant_id"] if sessions else None
 
 
-def default_colab_secret(name: str) -> str | None:
-    """Return `name` from Colab's secret store, or None when it is not available."""
-    try:
-        # ty: ignore[unresolved-import] - provided by the Colab kernel, uninstallable elsewhere
-        from google.colab import userdata  # noqa: PLC0415 - only exists on Colab
-    except ImportError:
-        return None
-    try:
-        return userdata.get(name)
-    except Exception:  # secret absent, or its notebook access is off
-        return None
-
-
-def default_kaggle_secret(name: str) -> str | None:
-    """Return `name` from Kaggle's secret store, or None when it is not available."""
-    try:
-        # ty: ignore[unresolved-import] - provided by the Kaggle kernel, uninstallable elsewhere
-        from kaggle_secrets import UserSecretsClient  # noqa: PLC0415 - only exists on Kaggle
-    except ImportError:
-        return None
-    try:
-        return UserSecretsClient().get_secret(name)
-    except Exception:  # secret absent, or not attached to this notebook
-        return None
-
-
-def default_secret(name: str) -> str | None:
-    """Return `name` from the secret store of whichever host this kernel runs on.
-
-    Only Colab and Kaggle have one. Every other host keeps secrets in the
-    environment, which `load_secret` reads before it ever calls this.
-    """
-    environment = detect_environment(modules=default_modules(), environ=os.environ)
-    if environment is NotebookEnvironment.COLAB:
-        return default_colab_secret(name)
-    if environment is NotebookEnvironment.KAGGLE:
-        return default_kaggle_secret(name)
-    return None
-
-
 def default_namespace() -> MutableMapping[str, Any]:
     """Return the notebook's own namespace, where cell-defined agents live."""
     return sys.modules["__main__"].__dict__
 
 
-def default_modules() -> Container[str]:
-    """Return the names of currently imported modules."""
-    return tuple(sys.modules)
+def default_in_colab() -> bool:
+    """Report whether this kernel is a Colab runtime.
+
+    Colab imports `google.colab` into every kernel it starts, and nothing else
+    can import it at all.
+    """
+    return "google.colab" in sys.modules
 
 
 def default_display_html(html: str) -> bool:
@@ -325,9 +288,8 @@ class Runtime:
     port_is_free: Callable[[int], bool] = default_port_is_free
     find_free_port: Callable[[], int] = default_find_free_port
     workspace_id: Callable[[], str | None] = default_workspace_id
-    secret: Callable[[str], str | None] = default_secret
     namespace: Callable[[], MutableMapping[str, Any]] = default_namespace
-    modules: Callable[[], Container[str]] = default_modules
+    in_colab: Callable[[], bool] = default_in_colab
     render: Callable[[str, str | None], None] = default_render
     quiet: Callable[[], Callable[[], None]] = default_quiet
     sleep: Callable[[float], None] = time.sleep

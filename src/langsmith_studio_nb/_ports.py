@@ -1,4 +1,4 @@
-"""Choose the port to serve on."""
+"""Choose the address to serve on."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+LOOPBACK = "127.0.0.1"
 
 
 def resolve_port(port: int, *, is_free: Callable[[int], bool], find_free: Callable[[], int]) -> int:
