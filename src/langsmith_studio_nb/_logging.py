@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class Leveled(Protocol):
-    """Anything whose logging level can be raised."""
+    """Anything with a settable logging level."""
 
     level: int
 
@@ -43,9 +43,9 @@ def silence_loggers(
 ) -> Callable[[], None]:
     """Raise the level of the server's loggers and return a restorer.
 
-    Safe to call before the server is imported: `getLogger` creates a placeholder
-    whose level survives the real module's import, and `langgraph_api` calls
-    `logging.basicConfig(INFO)` at import time.
+    Safe to call before anything imports the server. `getLogger` creates a
+    placeholder whose level survives the real module's import, and `langgraph_api`
+    calls `logging.basicConfig(INFO)` at import time.
     """
     loggers = [get_logger(name) for name in names]
     previous = [logger.level for logger in loggers]

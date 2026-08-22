@@ -1,7 +1,7 @@
 [project]
 name = "langsmith-studio-nb"
 version = "0.1.3"
-description = "Open LangGraph Studio on an agent defined in your notebook — Colab, Kaggle, Binder, JupyterHub, or local Jupyter."
+description = "Open LangGraph Studio on an agent defined in your notebook, on Colab, Kaggle, Binder, JupyterHub, or local Jupyter."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -16,8 +16,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-# IPython is deliberately absent: every notebook already has one, and
-# depending on it upgrades Colab out from under `google-colab`.
+# IPython is deliberately absent. Every notebook already has one, and depending
+# on it upgrades Colab out from under `google-colab`.
 dependencies = [
     "langgraph-cli[inmem]>=0.4.31",
 ]
@@ -53,6 +53,14 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "D", "PLR0913", "PLR2004", "RUF012", "S101", "S310", "TC"]
+# The Colab import has to stay inside the function. It probes for the host, and at
+# notebook top level it would fail the cell everywhere else.
+"examples/*.ipynb" = ["PLC0415"]
+
+[tool.ty.src]
+# The example notebooks import the agent stack they tell the reader to install.
+# Adding it here to satisfy ty would pull ~110 MB into every `uv sync`.
+exclude = ["examples"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

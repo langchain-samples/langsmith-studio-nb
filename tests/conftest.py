@@ -32,7 +32,7 @@ class FakeWorker:
 
 
 class FakeTunnelProcess:
-    """Stand-in for the exact cloudflared process owned by a session."""
+    """Stand-in for the exact cloudflared process a session owns."""
 
     def __init__(self) -> None:
         self.killed = False
@@ -42,7 +42,7 @@ class FakeTunnelProcess:
 
 
 class FakeRuntime:
-    """Builds a `Runtime` whose effects are recorded instead of performed."""
+    """Build a `Runtime` that records its effects instead of performing them."""
 
     def __init__(
         self,
@@ -118,7 +118,7 @@ class FakeRuntime:
         return OpenedTunnel(url=url, process=process)
 
     def status(self, url: str) -> int | None:
-        """Report a status the way the real one does: None means nothing answered."""
+        """Report a status the way the real one does. None means nothing answered."""
         self.probed.append(url)
         if any(url.startswith(prefix) for prefix in self.unroutable):
             return 530  # Cloudflare answering for a tunnel it cannot route

@@ -36,7 +36,7 @@ def test_silence_loggers_covers_the_server_and_its_tunnel():
 
 
 def test_silence_loggers_applies_before_import():
-    """A placeholder logger keeps its level once the real module is imported."""
+    """A placeholder logger keeps its level once something imports the real module."""
     name = "langsmith_studio_nb_test_not_yet_imported"
 
     silence_loggers(logging.ERROR, names=[name])

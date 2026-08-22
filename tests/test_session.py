@@ -278,7 +278,7 @@ def test_start_studio_hints_at_allowed_domains_when_tunneling():
 
 
 def test_session_renders_as_nothing_when_echoed():
-    """The link is already displayed; the dataclass repr would duplicate it."""
+    """The package already displayed the link, so the repr would duplicate it."""
     session = StudioSession(
         api_url="http://x", studio_url="http://y", tunnel=False, graphs=("agent",)
     )
@@ -327,7 +327,7 @@ def test_restart_failure_releases_the_tunnel_kept_during_transition():
 
 
 def test_start_studio_opens_a_new_tunnel_when_the_old_one_stopped_answering():
-    """cloudflared outlives the tunnel Cloudflare dropped, so only the URL can be trusted."""
+    """cloudflared outlives the tunnel Cloudflare dropped, so only the URL is worth trusting."""
     fake = _tunneling_runtime()
     runtime = fake.build()
 
@@ -481,7 +481,7 @@ def test_start_studio_keeps_a_new_tunnel_this_host_cannot_reach_itself():
 
 
 def test_restart_keeps_a_tunnel_this_host_could_never_reach():
-    """Silence condemns only a tunnel this host has reached before."""
+    """Silence rules out only a tunnel this host has reached before."""
     fake = FakeRuntime(
         modules=("google.colab",),
         unreachable=("https://x.trycloudflare.com",),

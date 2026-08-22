@@ -15,8 +15,10 @@ from langsmith_studio_nb._render import link_text
 from langsmith_studio_nb._runtime import (
     Runtime,
     capture_uvicorn_server,
+    default_colab_secret,
     default_display_html,
     default_find_free_port,
+    default_kaggle_secret,
     default_modules,
     default_namespace,
     default_open_tunnel,
@@ -24,6 +26,7 @@ from langsmith_studio_nb._runtime import (
     default_quiet,
     default_render,
     default_run_server,
+    default_secret,
     default_spawn,
     default_status,
     default_workspace_id,
@@ -47,6 +50,29 @@ def _install_module(monkeypatch, name, **attributes):
         setattr(module, key, value)
     monkeypatch.setitem(sys.modules, name, module)
     return module
+
+
+def _userdata(secrets):
+    class UserData:
+        @staticmethod
+        def get(name):
+            try:
+                return secrets[name]
+            except KeyError:
+                raise RuntimeError("SecretNotFoundError") from None
+
+    return UserData
+
+
+def _user_secrets(secrets):
+    class UserSecretsClient:
+        def get_secret(self, name):
+            try:
+                return secrets[name]
+            except KeyError:
+                raise RuntimeError("BackendError") from None
+
+    return UserSecretsClient
 
 
 def test_default_run_server_delegates_to_langgraph(monkeypatch):
@@ -107,7 +133,7 @@ def test_default_spawn_stops_the_server_its_thread_built(monkeypatch):
 
 
 def test_thread_worker_stops_a_server_that_is_still_starting(monkeypatch):
-    """A stop must not slip past a server that has not been built yet."""
+    """A stop must not slip past a server that does not exist yet."""
     uvicorn = _install_uvicorn(monkeypatch)
     stop_requested = threading.Event()
     built = []
@@ -383,6 +409,66 @@ def test_default_quiet_silences_the_server(monkeypatch):
     assert returned is restore
 
 
+def test_default_colab_secret(monkeypatch):
+    _install_module(monkeypatch, "google.colab", userdata=_userdata({"KEY": "colab-value"}))
+
+    assert default_colab_secret("KEY") == "colab-value"
+
+
+def test_default_colab_secret_when_the_secret_is_unavailable(monkeypatch):
+    _install_module(monkeypatch, "google.colab", userdata=_userdata({}))
+
+    assert default_colab_secret("KEY") is None
+
+
+def test_default_colab_secret_off_colab(monkeypatch):
+    monkeypatch.setitem(sys.modules, "google.colab", None)
+
+    assert default_colab_secret("KEY") is None
+
+
+def test_default_kaggle_secret(monkeypatch):
+    _install_module(
+        monkeypatch, "kaggle_secrets", UserSecretsClient=_user_secrets({"KEY": "kaggle-value"})
+    )
+
+    assert default_kaggle_secret("KEY") == "kaggle-value"
+
+
+def test_default_kaggle_secret_when_the_secret_is_unavailable(monkeypatch):
+    _install_module(monkeypatch, "kaggle_secrets", UserSecretsClient=_user_secrets({}))
+
+    assert default_kaggle_secret("KEY") is None
+
+
+def test_default_kaggle_secret_off_kaggle(monkeypatch):
+    monkeypatch.setitem(sys.modules, "kaggle_secrets", None)
+
+    assert default_kaggle_secret("KEY") is None
+
+
+@pytest.mark.parametrize(
+    ("modules", "environ", "reader"),
+    [
+        (("google.colab",), {}, "default_colab_secret"),
+        ((), {"KAGGLE_URL_BASE": "https://kaggle.com"}, "default_kaggle_secret"),
+    ],
+)
+def test_default_secret_asks_the_host_store(monkeypatch, modules, environ, reader):
+    monkeypatch.setattr(_runtime, "default_modules", lambda: modules)
+    monkeypatch.setattr(_runtime.os, "environ", environ)
+    monkeypatch.setattr(_runtime, reader, lambda name: f"{reader}:{name}")
+
+    assert default_secret("KEY") == f"{reader}:KEY"
+
+
+def test_default_secret_is_none_on_a_host_without_a_store(monkeypatch):
+    monkeypatch.setattr(_runtime, "default_modules", tuple)
+    monkeypatch.setattr(_runtime.os, "environ", {})
+
+    assert default_secret("KEY") is None
+
+
 def test_runtime_defaults_are_the_real_implementations():
     runtime = Runtime()
 
@@ -391,4 +477,5 @@ def test_runtime_defaults_are_the_real_implementations():
     assert runtime.status is default_status
     assert runtime.port_is_free is default_port_is_free
     assert runtime.find_free_port is default_find_free_port
+    assert runtime.secret is default_secret
     assert runtime.environ is not None

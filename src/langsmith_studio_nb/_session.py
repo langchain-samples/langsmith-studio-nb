@@ -24,7 +24,7 @@ TUNNEL_HINT = (
 TUNNEL_FAILED = (
     "The tunnel never came up, so the server is reachable only from this kernel and "
     "Studio cannot connect to it. Cloudflare rate limits quick tunnels per IP address, "
-    "which notebook hosts share, so this usually clears on its own: wait a minute and "
+    "which notebook hosts share, so this usually clears on its own. Wait a minute and "
     "re-run this cell. Pass verbose=True to see what cloudflared reported."
 )
 TUNNEL_ERROR = "The tunnel could not be opened: "
@@ -84,14 +84,14 @@ class StudioSession:
 
 def stop_studio(*, runtime: Runtime | None = None) -> None:
     """Stop a running agent server and its tunnel. Safe to call when none is running."""
-    _ = runtime  # retained for API compatibility with injected test runtimes
+    _ = runtime  # unused, but injected test runtimes pass one
     _stop(keep_tunnel=False)
 
 
 def _stop(*, keep_tunnel: bool) -> _Tunnel | None:
-    """Stop owned resources, optionally returning the tunnel kept for a restart.
+    """Stop owned resources, optionally returning the tunnel a restart can keep.
 
-    Releases what it can and never raises: this is the only path that kills the
+    Releases what it can and never raises. This is the only path that kills the
     tunnel and restores logging, so a server that will not stop must not take
     them down with it.
     """
@@ -103,8 +103,8 @@ def _stop(*, keep_tunnel: bool) -> _Tunnel | None:
     state, _state = _state, None
     state.worker.stop()
     # A server draining a long request outlives the join, but gives up its port
-    # as it starts shutting down, so the tunnel is still worth keeping: whether
-    # the replacement lands on that port is settled once it reports one.
+    # as it starts shutting down, so the tunnel is still worth keeping. The next
+    # server reports the port it got, which settles whether it can use this one.
     state.worker.join(timeout=_JOIN_TIMEOUT)
     kept = state.tunnel if keep_tunnel else None
     try:
@@ -119,9 +119,9 @@ def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
     """Return the tunnel a restart can keep, if it still serves `requested`.
 
     Ask the tunnel itself, while the server it forwards to is still up. A live
-    `cloudflared` process proves nothing: Cloudflare drops a quick tunnel on its
-    own, and a reconnect comes back under a new hostname, leaving the process
-    running behind a URL that answers nothing.
+    `cloudflared` process proves nothing. Cloudflare drops a quick tunnel on its
+    own, and a reconnect comes back under a new hostname, which leaves the
+    process running behind a URL that answers nothing.
     """
     if _state is None or _state.tunnel is None or _state.tunnel.requested != requested:
         return None
@@ -129,8 +129,8 @@ def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
     reached = _reached(tunnel.url, runtime=runtime)
     if reached is not None:
         return tunnel._replace(confirmed=True) if reached else None
-    # Nothing answered. Only a tunnel this host has reached before is condemned
-    # by that; one it never could is no worse off than when it was opened.
+    # Nothing answered. That only rules out a tunnel this host has reached
+    # before. One it never reached is no worse off than when it opened.
     return None if tunnel.confirmed else tunnel
 
 
@@ -146,12 +146,12 @@ def _reached(url: str, *, runtime: Runtime) -> bool | None:
 
 
 def _confirm_new_tunnel(url: str, *, runtime: Runtime) -> bool | None:
-    """Wait out DNS for a verdict on a tunnel just opened.
+    """Wait out DNS for a verdict on a tunnel this session just opened.
 
     A tunnel that works answers the first time, so only a tunnel in doubt costs
     the wait. Cloudflare answers for a tunnel it cannot route, and that one is
-    worth replacing, but silence is not a verdict: a new hostname can take
-    minutes to resolve here while the browser reaches it immediately, and
+    worth replacing, but silence is not a verdict. A new hostname can take
+    minutes to resolve here while the browser reaches it straight away, and
     re-opening on that guess spends a tunnel against a rate limit the whole
     notebook host shares.
     """
@@ -234,7 +234,7 @@ def start_studio(
     Args:
         variables: Names of the compiled graphs in the notebook namespace.
             Defaults to `agent`.
-        port: Port to serve on. A busy port is replaced with a free one.
+        port: Port to serve on. If it is busy, this picks a free one instead.
         tunnel: Force a public tunnel on or off. Defaults to whether the
             notebook host runs the kernel away from the browser.
         timeout: Seconds to wait for the server to answer before giving up.
@@ -268,7 +268,7 @@ def start_studio(
     reused = _reusable_tunnel(requested=requested, runtime=runtime) if tunnel else None
     reused = _stop(keep_tunnel=reused is not None)
     try:
-        # The tunnel forwards to the port it was opened on, so a restart goes back there.
+        # The tunnel forwards to the port we opened it on, so a restart goes back there.
         port = resolve_port(
             reused.port if reused else requested,
             is_free=runtime.port_is_free,

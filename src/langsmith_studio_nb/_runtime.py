@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, MutableMapping
 
+from langsmith_studio_nb._environment import NotebookEnvironment, detect_environment
 from langsmith_studio_nb._logging import silence_loggers
 from langsmith_studio_nb._render import link_html, link_text
 
@@ -37,7 +38,7 @@ class Worker(Protocol):
 
 
 class TunnelProcess(Protocol):
-    """The exact cloudflared process opened for this session."""
+    """The exact cloudflared process this session opened."""
 
     def kill(self) -> None:
         """Terminate the process."""
@@ -60,12 +61,12 @@ def default_run_server(**kwargs: Any) -> None:  # noqa: ANN401 - forwards run_se
 
 
 def capture_uvicorn_server(sink: Callable[[Any], None]) -> Callable[[], None]:
-    """Hand `sink` the next Uvicorn server built in this process. Returns an undo.
+    """Hand `sink` the next Uvicorn server this process builds. Returns an undo.
 
     `run_server` owns `uvicorn.run`, which builds the server and blocks, so the
-    only handle on it is the one taken as it is constructed. Do not go looking
-    for the object instead: a search of the kernel finds servers this session
-    does not own, and one over `sys._current_frames()` races the frames it walks.
+    only handle on it is the one taken as it is built. Do not go looking for the
+    object instead. A search of the kernel finds servers this session does not
+    own, and one over `sys._current_frames()` races the frames it walks.
     """
     import uvicorn  # noqa: PLC0415 - imported by the server, not by this package
 
@@ -98,7 +99,7 @@ class _ThreadWorker:
     def _captured(self, server: Any) -> None:  # noqa: ANN401 - uvicorn's server object
         self._server = server
         if self._stopping:
-            # Asked to stop before the server existed; it exits as it comes up.
+            # The caller asked to stop before the server existed, so it exits as it starts.
             server.should_exit = True
 
     def is_alive(self) -> bool:
@@ -115,7 +116,7 @@ class _ThreadWorker:
     def stop(self) -> None:
         """Ask this worker's Uvicorn server to exit.
 
-        Leaves the capture in place when the server is not up yet: `_captured`
+        Leaves the capture in place when the server is not up yet. `_captured`
         stops it on arrival, so a stop cannot slip past a starting server.
         """
         self._stopping = True
@@ -146,9 +147,9 @@ def default_open_tunnel(port: int, *, timeout: float = 30.0) -> OpenedTunnel:
 def default_status(url: str, *, timeout: float = 5.0) -> int | None:
     """Return the status `url` answers with, or None when nothing answered.
 
-    The difference matters for a tunnel: an error from Cloudflare means the
-    tunnel is routed to nothing, while no answer at all means only that this
-    host could not reach it.
+    The difference matters for a tunnel. An error from Cloudflare means it
+    routes to nothing, while no answer at all means only that this host could
+    not reach it.
     """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - URL comes from the server we started
@@ -162,7 +163,7 @@ def default_status(url: str, *, timeout: float = 5.0) -> int | None:
 def default_port_is_free(port: int, *, host: str = "127.0.0.1") -> bool:
     """Report whether `port` can be bound on `host`."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        # Matches the server's own check: without it a port still in TIME_WAIT
+        # Matches the server's own check. Without it, a port still in TIME_WAIT
         # from the server we just stopped reads as busy.
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -193,6 +194,46 @@ def default_workspace_id() -> str | None:
     return sessions[0]["tenant_id"] if sessions else None
 
 
+def default_colab_secret(name: str) -> str | None:
+    """Return `name` from Colab's secret store, or None when it is not available."""
+    try:
+        # ty: ignore[unresolved-import] - provided by the Colab kernel, uninstallable elsewhere
+        from google.colab import userdata  # noqa: PLC0415 - only exists on Colab
+    except ImportError:
+        return None
+    try:
+        return userdata.get(name)
+    except Exception:  # secret absent, or its notebook access is off
+        return None
+
+
+def default_kaggle_secret(name: str) -> str | None:
+    """Return `name` from Kaggle's secret store, or None when it is not available."""
+    try:
+        # ty: ignore[unresolved-import] - provided by the Kaggle kernel, uninstallable elsewhere
+        from kaggle_secrets import UserSecretsClient  # noqa: PLC0415 - only exists on Kaggle
+    except ImportError:
+        return None
+    try:
+        return UserSecretsClient().get_secret(name)
+    except Exception:  # secret absent, or not attached to this notebook
+        return None
+
+
+def default_secret(name: str) -> str | None:
+    """Return `name` from the secret store of whichever host this kernel runs on.
+
+    Only Colab and Kaggle have one. Every other host keeps secrets in the
+    environment, which `load_secret` reads before it ever calls this.
+    """
+    environment = detect_environment(modules=default_modules(), environ=os.environ)
+    if environment is NotebookEnvironment.COLAB:
+        return default_colab_secret(name)
+    if environment is NotebookEnvironment.KAGGLE:
+        return default_kaggle_secret(name)
+    return None
+
+
 def default_namespace() -> MutableMapping[str, Any]:
     """Return the notebook's own namespace, where cell-defined agents live."""
     return sys.modules["__main__"].__dict__
@@ -204,7 +245,7 @@ def default_modules() -> Container[str]:
 
 
 def default_display_html(html: str) -> bool:
-    """Render `html` in the notebook output, reporting whether it was shown."""
+    """Render `html` in the notebook output, and report whether IPython was there to show it."""
     try:
         from IPython.display import HTML, display  # noqa: PLC0415 - only needed inside a notebook
     except ImportError:
@@ -235,6 +276,7 @@ class Runtime:
     port_is_free: Callable[[int], bool] = default_port_is_free
     find_free_port: Callable[[], int] = default_find_free_port
     workspace_id: Callable[[], str | None] = default_workspace_id
+    secret: Callable[[str], str | None] = default_secret
     namespace: Callable[[], MutableMapping[str, Any]] = default_namespace
     modules: Callable[[], Container[str]] = default_modules
     render: Callable[[str, str | None], None] = default_render

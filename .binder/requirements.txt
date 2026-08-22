@@ -1,0 +1,16 @@
+# Binder only. Builds the environment for examples/, which needs the agent stack that
+# this package itself does not depend on. Nothing here affects installing the package.
+deepagents~=0.7.8
+langchain~=1.3.16
+langchain-anthropic~=1.5.1
+langsmith~=0.11.1
+
+# This repo, from the commit Binder launched, rather than a published or pinned copy.
+#
+# Keep this line. It looks redundant next to pyproject.toml, but it does two jobs.
+#
+# A .binder/ directory makes repo2docker stop treating the repo as a Python package,
+# so nothing else installs it. And a *local* requirement is what defers this file's
+# install until after repo2docker stages the repo. Without that, the "." resolves to nothing,
+# because a bare `pip install -r` of the other four lines runs too early to see it.
+.
