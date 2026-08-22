@@ -1,8 +1,12 @@
 # Binder only. Builds the environment for examples/, which needs the agent stack that
 # this package itself does not depend on. Nothing here affects installing the package.
+#
+# Do not pin langchain-anthropic or langchain-google-genai here. deepagents already
+# requires both, and a pin narrower than its own floor makes pip give up rather than
+# pick a version. Only langchain-openai needs listing; deepagents does not pull it in.
 deepagents~=0.7.8
 langchain~=1.3.16
-langchain-anthropic~=1.5.1
+langchain-openai~=1.6.0
 langsmith~=0.11.1
 
 # This repo, from the commit Binder launched, rather than a published or pinned copy.

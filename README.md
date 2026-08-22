@@ -23,7 +23,7 @@ Requires Python 3.11+. `langgraph-cli[inmem]` comes with it, so this is the only
 ## Quickstart
 
 ```python
-%pip install -q git+https://github.com/langchain-samples/langsmith-studio-nb.git deepagents
+%pip install -q git+https://github.com/langchain-samples/langsmith-studio-nb.git deepagents langchain-openai
 ```
 
 ```python
@@ -31,7 +31,7 @@ import os
 
 from langsmith_studio_nb import load_secret
 
-load_secret("ANTHROPIC_API_KEY")  # Colab and Kaggle: from their secret stores
+load_secret("OPENAI_API_KEY")  # Colab and Kaggle: from their secret stores
 load_secret("LANGSMITH_API_KEY")  # elsewhere: from the environment
 os.environ["LANGSMITH_TRACING"] = "true"
 ```
@@ -46,7 +46,7 @@ def get_weather(city: str) -> str:
 
 
 agent = create_deep_agent(
-    model="anthropic:claude-sonnet-5",
+    model="openai:gpt-5.6-luna",
     tools=[get_weather],
     system_prompt="You are a helpful research assistant.",
 )
@@ -125,7 +125,7 @@ from dotenv import load_dotenv
 from langsmith_studio_nb import load_secret
 
 load_dotenv()  # local and Binder: a .env file
-load_secret("ANTHROPIC_API_KEY")  # Colab: userdata. Kaggle: UserSecretsClient.
+load_secret("OPENAI_API_KEY")  # Colab: userdata. Kaggle: UserSecretsClient.
 ```
 
 Only Colab and Kaggle have a store to ask. Everywhere else the environment is all there is. It writes into the environment because that is where the model and tracing SDKs go looking for a key. When it cannot find the secret it raises `RuntimeError` naming the fix for the host it detected, or returns `None` if you passed `required=False`. It never prints or logs the value.
