@@ -1,0 +1,25 @@
+examples/.env.example
+  s_5be74d9a32ddef::t_8327ef927531a2 4-5
+.binder/requirements.txt
+  s_5be74d9a32ddef::t_8f67d39d3551a0 3-6,9
+README.md
+  s_5be74d9a32ddef::t_44baa9f4d7e504 26,34,49,128
+examples/deep_agent_in_studio.ipynb
+  s_5be74d9a32ddef::t_5cef5f59992bac 29,32-34,52,63,127,148,154,186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "2b370978ca492ced8e1637522aedcf91d8b5923e",
+  "prompts": {},
+  "sessions": {
+    "s_5be74d9a32ddef": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "93339bfe-a3d6-4bc2-952e-5009253f1d04",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Dariel Dato-on <293921406+darieldatoon@users.noreply.github.com>"
+    }
+  }
+}
