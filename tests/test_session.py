@@ -1,3 +1,6 @@
+import threading
+from dataclasses import replace
+
 import pytest
 
 from langsmith_studio_nb import _session
@@ -6,7 +9,7 @@ from langsmith_studio_nb._session import (
     start_studio,
     stop_studio,
 )
-from tests.conftest import FakeRuntime, FakeTunnelProcess, FakeWorker
+from tests.conftest import FakeRuntime, FakeTunnel, FakeWorker
 
 
 def test_start_studio_serves_the_notebook_agent_and_returns_the_studio_url():
@@ -201,7 +204,7 @@ def test_stop_studio_is_safe_with_no_server_running():
 def test_stop_studio_leaves_unowned_tunnels_alone():
     fake = FakeRuntime(in_colab=True)
     runtime = fake.build()
-    unowned = FakeTunnelProcess()
+    unowned = FakeTunnel()
     start_studio(runtime=runtime)
 
     stop_studio()
@@ -325,7 +328,7 @@ def test_restart_failure_releases_the_tunnel_kept_during_transition():
 
 
 def test_start_studio_opens_a_new_tunnel_when_the_old_one_stopped_answering():
-    """cloudflared outlives the tunnel Cloudflare dropped, so only the URL is worth trusting."""
+    """cloudflared outlives the tunnel Cloudflare dropped, so only /ready is worth asking."""
     fake = _tunneling_runtime()
     runtime = fake.build()
 
@@ -403,7 +406,7 @@ def test_start_studio_replaces_a_tunnel_that_never_connects():
 
 
 def test_start_studio_falls_back_to_http2_after_the_default_protocol_fails():
-    """The default rides UDP, which notebook hosts drop; http2 rides TCP 443."""
+    """The default rides UDP, which notebook hosts drop; http2 rides TCP 7844."""
     fake = FakeRuntime(in_colab=True, tunnel_ready=[False, True], tick=3.0)
 
     start_studio(runtime=fake.build())
@@ -411,18 +414,14 @@ def test_start_studio_falls_back_to_http2_after_the_default_protocol_fails():
     assert fake.opened_tunnel_protocols == [None, "http2"]
 
 
-def test_start_studio_gives_up_after_three_tunnels_that_never_connect():
-    """Better an error than a link that cannot work; each attempt costs a tunnel."""
-    fake = FakeRuntime(
-        in_colab=True,
-        tunnel_ready=[False, False, False],
-        tick=3.0,
-    )
+def test_start_studio_spends_one_tunnel_per_route_and_no_more():
+    """Better an error than a link that cannot work, and a repeat buys no new route."""
+    fake = FakeRuntime(in_colab=True, tunnel_ready=[False, False], tick=3.0)
 
     with pytest.raises(RuntimeError, match="never reached Cloudflare"):
         start_studio(runtime=fake.build())
 
-    assert len(fake.tunnels) == 3
+    assert fake.opened_tunnel_protocols == [None, "http2"]
     assert all(tunnel.killed for tunnel in fake.tunnels)
     assert fake.rendered == []
     assert _session._state is None
@@ -430,16 +429,12 @@ def test_start_studio_gives_up_after_three_tunnels_that_never_connect():
 
 
 def test_start_studio_waits_between_tunnel_attempts():
-    fake = FakeRuntime(
-        in_colab=True,
-        tunnel_ready=[False, False, False],
-        tick=3.0,
-    )
+    fake = FakeRuntime(in_colab=True, tunnel_ready=[False, False], tick=3.0)
 
     with pytest.raises(RuntimeError):
         start_studio(runtime=fake.build())
 
-    assert fake.sleeps.count(2.0) == 2  # paused between attempts, not after the last
+    assert fake.sleeps.count(2.0) == 1  # paused between attempts, not after the last
 
 
 def test_start_studio_reports_what_stopped_the_tunnel():
@@ -496,6 +491,176 @@ def test_start_studio_closes_a_tunnel_it_was_interrupted_while_checking():
     with pytest.raises(KeyboardInterrupt):
         start_studio(runtime=runtime)
 
+    assert fake.tunnels[0].closes == 1
+    assert _session._state is None
+
+
+def test_start_studio_gives_the_api_url_variable_back_when_it_stops():
+    """Other langgraph tooling in the notebook reads this; ours dies with the server."""
+    fake = FakeRuntime(environ={"LANGGRAPH_API_URL": "http://example.invalid"})
+    runtime = fake.build()
+
+    start_studio(runtime=runtime)
+
+    assert fake.environ["LANGGRAPH_API_URL"] == "http://127.0.0.1:2024"
+
+    stop_studio()
+
+    assert fake.environ["LANGGRAPH_API_URL"] == "http://example.invalid"
+
+
+def test_stop_studio_leaves_no_dead_api_url_behind():
+    fake = FakeRuntime()
+    runtime = fake.build()
+    start_studio(runtime=runtime)
+
+    stop_studio()
+
+    assert "LANGGRAPH_API_URL" not in fake.environ
+
+
+def test_start_studio_replaces_a_tunnel_cloudflare_drops_mid_restart():
+    """The kept tunnel was checked before the old server stopped; the link goes out later."""
+    fake = FakeRuntime(
+        in_colab=True,
+        tunnel_urls=["https://first.trycloudflare.com", "https://second.trycloudflare.com"],
+        tick=3.0,
+    )
+    runtime = fake.build()
+    start_studio(runtime=runtime)
+
+    def drop_it_once_the_reuse_check_has_passed(url):
+        if url == fake.ready_urls[0]:
+            fake.drop_tunnel(0)
+
+    fake.after_probe = drop_it_once_the_reuse_check_has_passed
+    session = start_studio(runtime=runtime)
+
+    assert session.api_url == "https://second.trycloudflare.com"
+    assert [tunnel.closes for tunnel in fake.tunnels] == [1, 0]
+
+
+def test_stop_studio_releases_everything_when_the_worker_will_not_stop():
+    fake = FakeRuntime(in_colab=True, worker=FakeWorker(stop_error=RuntimeError("wedged")))
+    runtime = fake.build()
+    start_studio(runtime=runtime)
+
+    stop_studio()
+
     assert fake.tunnels[0].killed is True
-    assert fake.tunnels[0].reaped is True
+    assert fake.logging_restored == 1
+    assert _session._state is None
+
+
+def test_stop_studio_restores_logging_when_the_tunnel_will_not_close():
+    """Teardown has nothing to fall back on, so one broken step must not take the rest."""
+    fake = FakeRuntime(in_colab=True)
+    runtime = fake.build()
+    start_studio(runtime=runtime)
+    fake.tunnels[0].close_error = OSError("no such process")
+
+    stop_studio()
+
+    assert fake.logging_restored == 1
+    assert "LANGGRAPH_API_URL" not in fake.environ
+
+
+def test_stop_studio_gives_up_the_tunnel_when_the_join_is_interrupted():
+    """A Ctrl-C on a slow shutdown would otherwise orphan cloudflared for the kernel's life."""
+    fake = FakeRuntime(in_colab=True, worker=FakeWorker(join_error=KeyboardInterrupt()))
+    runtime = fake.build()
+    start_studio(runtime=runtime)
+
+    with pytest.raises(KeyboardInterrupt):
+        stop_studio()
+
+    assert fake.tunnels[0].killed is True
+    assert fake.logging_restored == 1
+    assert _session._state is None
+
+
+def test_a_stop_from_another_thread_waits_for_the_start_to_finish():
+    """A stop landing mid-start would tear down the session `start_studio` is about to return."""
+    fake = FakeRuntime()
+    stopper = threading.Thread(target=stop_studio)
+
+    def workspace_id():
+        stopper.start()
+        stopper.join(0.2)
+
+        assert stopper.is_alive()  # waiting on the lock, not tearing this session down
+
+        return "ws-1"
+
+    runtime = replace(fake.build(), workspace_id=workspace_id)
+
+    session = start_studio(runtime=runtime)
+    stopper.join(5)
+
+    assert session.api_url == "http://127.0.0.1:2024"
+    assert _session._state is None  # the stop ran, but only once the start was done
+    assert fake.tunnels == []
+
+
+def test_a_second_start_waits_for_the_first_to_finish():
+    """Two starts that interleave would each stop the other's server and tunnel."""
+    fake = FakeRuntime(in_colab=True)
+    second = threading.Thread(target=lambda: start_studio(runtime=fake.build()))
+
+    def workspace_id():
+        second.start()
+        second.join(0.2)
+
+        assert second.is_alive()  # waiting on the lock, not opening a tunnel of its own
+        assert len(fake.tunnels) == 1
+
+        return "ws-1"
+
+    session = start_studio(runtime=replace(fake.build(), workspace_id=workspace_id))
+    second.join(5)
+
+    assert session.api_url == "https://x.trycloudflare.com"
+    assert [tunnel.closes for tunnel in fake.tunnels] == [0]  # one tunnel, kept across both
+    assert _session._state is not None
+
+
+def test_restart_closes_the_tunnel_it_kept_when_teardown_is_interrupted():
+    """A kept tunnel reaches its next owner before anything else is released."""
+    fake = FakeRuntime(in_colab=True)
+    runtime = fake.build()
+    start_studio(runtime=runtime)
+    fake.restore_error = KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        start_studio(runtime=runtime)
+
+    assert fake.tunnels[0].closes == 1  # handed on, then closed by the caller that took it
+    assert _session._state is None
+
+
+def test_start_studio_closes_a_new_tunnel_when_rendering_the_link_is_interrupted():
+    """A verified tunnel belongs to the session before anything downstream can fail."""
+    fake = FakeRuntime(in_colab=True)
+
+    def workspace_id():
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        start_studio(runtime=replace(fake.build(), workspace_id=workspace_id))
+
+    assert fake.tunnels[0].closes == 1
+    assert fake.rendered == []
+    assert _session._state is None
+
+
+def test_start_studio_stops_a_worker_whose_thread_would_not_start():
+    """The session owns the worker before it runs, so a failed start is still teardown's."""
+    fake = FakeRuntime(worker=FakeWorker(start_error=RuntimeError("can't start new thread")))
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        start_studio(runtime=fake.build())
+
+    assert fake.worker.stop_calls == 1  # found and stopped, not left running
+    assert fake.logging_restored == 1
+    assert "LANGGRAPH_API_URL" not in fake.environ
     assert _session._state is None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import os
 import re
@@ -13,6 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -30,7 +32,16 @@ tunnel_logger = logging.getLogger(TUNNEL_LOGGER)
 
 
 class Worker(Protocol):
-    """A background task running the agent server."""
+    """A background task that runs the agent server once started.
+
+    Built and started separately, so its owner can be recorded while nothing is
+    running yet. A worker that starts before anything holds it is one a failure
+    on the next line leaves running with nobody to stop it.
+    """
+
+    def start(self) -> None:
+        """Begin running. Call once, and only once the caller owns this."""
+        ...
 
     def is_alive(self) -> bool:
         """Report whether the task is still running."""
@@ -45,25 +56,28 @@ class Worker(Protocol):
         ...
 
 
-class TunnelProcess(Protocol):
-    """The exact cloudflared process this session opened."""
-
-    def kill(self) -> None:
-        """Terminate the process."""
-        ...
-
-    def wait(self) -> int:
-        """Reap the terminated process and return its status."""
-        ...
-
-
 @dataclass(frozen=True)
 class OpenedTunnel:
-    """A Cloudflare tunnel by its public URL, owned process, and health check."""
+    """A running Cloudflare tunnel, and the only handle on it."""
 
     url: str
-    process: TunnelProcess
-    ready_url: str
+    port: int  # what it forwards to; it cannot follow a server that moves
+    ready_url: str  # cloudflared's own health check, which needs no DNS to answer
+    close: Callable[[], None]
+    """Stop the tunnel and release everything holding it.
+
+    Must be safe to call more than once. Ownership hands a tunnel to its next
+    owner before the last one lets go, which can close it twice; stranding a
+    cloudflared is the failure worth avoiding, and closing one twice is not.
+    """
+
+
+class OpenTunnel(Protocol):
+    """Opens a tunnel from the public internet to a local port."""
+
+    def __call__(self, port: int, *, protocol: str | None = None) -> OpenedTunnel:
+        """Open a tunnel to `port`, optionally over a named cloudflared protocol."""
+        ...
 
 
 def default_run_server(**kwargs: Any) -> None:  # noqa: ANN401 - forwards run_server's own options
@@ -73,35 +87,83 @@ def default_run_server(**kwargs: Any) -> None:  # noqa: ANN401 - forwards run_se
     run_server(**kwargs)
 
 
+_capture_lock = threading.Lock()
+_capture_sinks: dict[threading.Thread, Callable[[Any], None]] = {}
+_capture_installed: tuple[Any, Callable[..., None]] | None = None
+
+
+def _install_capture_locked(server_class: Any) -> None:  # noqa: ANN401 - uvicorn.Server
+    """Route every Uvicorn server built anywhere in this process past the registry.
+
+    One dispatcher, installed once. Do not wrap per caller: stacked wrappers
+    can only be unwound in the order they went on, and a worker that outlives
+    its join is never unwound at all, so the stack would grow for the life of
+    the kernel.
+    """
+    global _capture_installed  # noqa: PLW0603 - one hook per process
+
+    if _capture_installed is not None:
+        return
+    original = server_class.__init__
+
+    def dispatch(server: Any, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401 - forwards uvicorn's own arguments
+        original(server, *args, **kwargs)
+        with _capture_lock:
+            sink = _forget_locked(threading.current_thread())
+        if sink is not None:  # outside the lock: the sink runs caller code
+            sink(server)
+
+    _capture_installed = (server_class, original)
+    server_class.__init__ = dispatch
+
+
+def _forget_locked(thread: threading.Thread) -> Callable[[Any], None] | None:
+    """Take `thread`'s sink, and put Uvicorn back once nobody is waiting on it."""
+    global _capture_installed  # noqa: PLW0603 - one hook per process
+
+    sink = _capture_sinks.pop(thread, None)
+    if _capture_sinks or _capture_installed is None:
+        return sink
+    server_class, original = _capture_installed
+    server_class.__init__ = original
+    _capture_installed = None
+    return sink
+
+
 def capture_uvicorn_server(
-    sink: Callable[[Any], None], *, thread: threading.Thread
-) -> Callable[[], None]:
-    """Hand `sink` the next Uvicorn server `thread` builds. Returns an undo.
+    sink: Callable[[Any], None], *, target: Callable[[], None]
+) -> threading.Thread:
+    """Return an unstarted thread for `target`, and hand `sink` the server it builds.
 
     `run_server` owns `uvicorn.run`, which builds the server and blocks, so the
     only handle on it is the one taken as it is built. Do not go looking for the
     object instead. A search of the kernel finds servers this session does not
     own, and one over `sys._current_frames()` races the frames it walks.
 
-    Scoped to one thread because the hook it installs is process-wide: a server
-    another thread happens to build while this one starts up is not ours to stop.
+    Builds the thread rather than taking one, and hands back no way to
+    deregister, so a registration lasts exactly as long as its thread runs and
+    only that thread ever gives it up. Nothing outside can tell the difference
+    between a thread that never began and one that began and has not yet said
+    so — `Thread` publishes that from inside itself — and a caller that guessed
+    wrong either way would deregister a running server nothing can then stop.
+    A registration for a thread that never starts is kept instead: it can fire
+    for nobody, and it costs one dispatch on each Uvicorn server built after it.
     """
     import uvicorn  # noqa: PLC0415 - imported by the server, not by this package
 
-    original = uvicorn.Server.__init__
+    def run() -> None:
+        try:
+            target()
+        finally:
+            with _capture_lock:
+                _forget_locked(thread)
 
-    def capture(server: Any, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401 - forwards uvicorn's own arguments
-        original(server, *args, **kwargs)
-        if threading.current_thread() is thread:
-            undo()  # one server per session; take the first
-            sink(server)
+    thread = threading.Thread(target=run, daemon=True)
+    with _capture_lock:
+        _capture_sinks[thread] = sink
+        _install_capture_locked(uvicorn.Server)
 
-    def undo() -> None:
-        if uvicorn.Server.__init__ is capture:
-            uvicorn.Server.__init__ = original
-
-    uvicorn.Server.__init__ = capture
-    return undo
+    return thread
 
 
 class _ThreadWorker:
@@ -110,8 +172,10 @@ class _ThreadWorker:
     def __init__(self, target: Callable[[], None]) -> None:
         self._server: Any = None
         self._stopping = False
-        self._thread = threading.Thread(target=target, daemon=True)
-        self._undo_capture = capture_uvicorn_server(self._captured, thread=self._thread)
+        self._thread = capture_uvicorn_server(self._captured, target=target)
+
+    def start(self) -> None:
+        """Run the target on this worker's thread."""
         self._thread.start()
 
     def _captured(self, server: Any) -> None:  # noqa: ANN401 - uvicorn's server object
@@ -126,16 +190,15 @@ class _ThreadWorker:
 
     def join(self, timeout: float | None = None) -> None:
         """Wait for the worker thread to finish."""
-        self._thread.join(timeout)
-        if not self._thread.is_alive():
-            # The thread ended without building a server, so none is coming.
-            self._undo_capture()
+        with contextlib.suppress(RuntimeError):  # never started; nothing to wait for
+            self._thread.join(timeout)
 
     def stop(self) -> None:
         """Ask this worker's Uvicorn server to exit.
 
-        Leaves the capture in place when the server is not up yet. `_captured`
-        stops it on arrival, so a stop cannot slip past a starting server.
+        Leaves the registration in place when the server is not up yet.
+        `_captured` stops it on arrival, so a stop cannot slip past a starting
+        server.
         """
         self._stopping = True
         if self._server is not None:
@@ -143,34 +206,50 @@ class _ThreadWorker:
 
 
 def default_spawn(target: Callable[[], None]) -> Worker:
-    """Run `target` on an owned daemon thread so the notebook cell returns."""
+    """Build a worker that will run `target` on a daemon thread, so the cell returns.
+
+    Returns it unstarted. `Worker.start` is the second phase.
+    """
     return _ThreadWorker(target)
 
 
-def _publish_tunnel_url(process: Any, url: Future[str]) -> None:  # noqa: ANN401 - a Popen
+def _publish_tunnel_url(process: Any, url: Future[str], tail: deque[str]) -> None:  # noqa: ANN401 - a Popen
     """Log everything cloudflared says, and take the tunnel URL from it.
 
-    Ends by reporting how the process died when it never named a URL, so that a
-    cloudflared which exits at once is not left to look like a slow one.
+    Settles `url` on every path. Leaving it unsettled would strand the caller
+    on its timeout and have it report a reader that crashed as a slow
+    Cloudflare.
     """
-    last = ""
-    for line in process.stdout:
-        text = line.rstrip()
-        tunnel_logger.info("[cloudflared] %s", text)
-        last = text or last
-        found = _TUNNEL_URL.search(text)
-        if found and not url.done():
-            url.set_result(found.group(1))
+    try:
+        for line in process.stdout:
+            text = line.rstrip()
+            tunnel_logger.info("[cloudflared] %s", text)
+            if text:
+                tail.append(text)
+            found = _TUNNEL_URL.search(text)
+            if found and not url.done():
+                url.set_result(found.group(1))
+    except Exception as error:
+        if not url.done():
+            url.set_exception(error)
+        return
     if not url.done():
+        # End of the pipe means the process is on its way out, so this waits on
+        # something that is already leaving.
         url.set_exception(
-            RuntimeError(f"cloudflared exited with status {process.wait()}. {last}".strip())
+            RuntimeError(f"cloudflared exited with status {process.wait()}. {_last(tail)}".strip())
         )
+
+
+def _last(tail: deque[str]) -> str:
+    """Return the most recent line cloudflared printed, or nothing."""
+    return tail[-1] if tail else ""
 
 
 def default_open_tunnel(
     port: int, *, protocol: str | None = None, timeout: float = 30.0
 ) -> OpenedTunnel:
-    """Open a Cloudflare quick tunnel to `port` and retain its exact process.
+    """Open a Cloudflare quick tunnel to `port` and retain the only handle on it.
 
     Started here rather than through `langgraph_api`, which exposes no options,
     to ask cloudflared for a metrics address. Its `/ready` reports whether the
@@ -194,22 +273,59 @@ def default_open_tunnel(
     if protocol is not None:
         command += ["--protocol", protocol]
 
-    process = subprocess.Popen(  # noqa: S603 - fixed arguments, binary from langgraph_api
-        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-    )
-    atexit.register(process.kill)
-    url: Future[str] = Future()
-    threading.Thread(target=_publish_tunnel_url, args=(process, url), daemon=True).start()
+    # The exit hook goes on before the child exists, so the window in which an
+    # interrupt could orphan cloudflared is the one store below rather than a
+    # call into `atexit`. It cannot be closed: the child is running by the time
+    # `Popen` returns, and nothing can hold it until that value is stored.
+    spawned: list[Any] = []
+
+    def kill_spawned() -> None:
+        for process in spawned:
+            process.kill()
+
+    registered = atexit.register(kill_spawned)
     try:
-        return OpenedTunnel(
-            url=url.result(timeout=timeout),
-            process=process,
-            ready_url=f"http://{LOOPBACK}:{metrics_port}/ready",
+        spawned.append(
+            subprocess.Popen(  # noqa: S603 - fixed arguments, binary from langgraph_api
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+            )
         )
     except BaseException:
-        process.kill()
-        process.wait()  # reap it here; nothing owns this one yet
+        atexit.unregister(registered)
         raise
+    process = spawned[0]
+
+    def close() -> None:
+        """Stop cloudflared and reap it. Safe to call more than once.
+
+        Gives up the exit hook only once the process is really gone, so an
+        interrupt anywhere in here leaves something still holding a cloudflared
+        that is still running.
+        """
+        try:
+            process.kill()
+        finally:
+            process.wait()  # a long session collects no zombies
+        atexit.unregister(registered)
+
+    tail: deque[str] = deque(maxlen=1)
+    try:
+        url: Future[str] = Future()
+        threading.Thread(target=_publish_tunnel_url, args=(process, url, tail), daemon=True).start()
+        opened = url.result(timeout=timeout)
+    except TimeoutError as error:
+        close()
+        message = f"cloudflared printed no tunnel URL in {timeout:g}s. {_last(tail)}"
+        raise TimeoutError(message.strip()) from error
+    except BaseException:
+        close()
+        raise
+    return OpenedTunnel(
+        url=opened,
+        port=port,
+        ready_url=f"http://{LOOPBACK}:{metrics_port}/ready",
+        close=close,
+    )
 
 
 def default_status(url: str, *, timeout: float = 5.0) -> int | None:
@@ -217,7 +333,8 @@ def default_status(url: str, *, timeout: float = 5.0) -> int | None:
 
     The difference matters for a tunnel. An error from Cloudflare means it
     routes to nothing, while no answer at all means only that this host could
-    not reach it.
+    not reach it. Every local failure reads as no answer on purpose: this is a
+    health probe in a retry loop, and it must not be the thing that raises.
     """
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - URL comes from the server we started
@@ -303,7 +420,7 @@ class Runtime:
 
     run_server: Callable[..., None] = default_run_server
     spawn: Callable[[Callable[[], None]], Worker] = default_spawn
-    open_tunnel: Callable[..., OpenedTunnel] = default_open_tunnel
+    open_tunnel: OpenTunnel = default_open_tunnel
     status: Callable[[str], int | None] = default_status
     port_is_free: Callable[[int], bool] = default_port_is_free
     find_free_port: Callable[[], int] = default_find_free_port

@@ -6,44 +6,72 @@ from typing import Any
 
 import pytest
 
-from langsmith_studio_nb import _session
+from langsmith_studio_nb import _runtime, _session
 from langsmith_studio_nb._runtime import OpenedTunnel, Runtime
 
 
 class FakeWorker:
     """Stand-in for the thread running the agent server."""
 
-    def __init__(self, *, alive: bool = True, stops: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        alive: bool = True,
+        stops: bool = True,
+        stop_error: BaseException | None = None,
+        join_error: BaseException | None = None,
+        start_error: BaseException | None = None,
+    ) -> None:
         self.alive = alive
         self.stops = stops
+        self.stop_error = stop_error
+        self.join_error = join_error
+        self.start_error = start_error
+        self.target: Any = None
         self.joins: list[float | None] = []
+        self.starts = 0
         self.stop_calls = 0
+
+    def start(self) -> None:
+        self.starts += 1
+        if self.start_error is not None:
+            raise self.start_error
+        if self.stop_calls and self.stops:
+            self.alive = True  # a restart brings this one back
+        if self.target is not None:
+            self.target()  # the real worker runs this on a thread
 
     def is_alive(self) -> bool:
         return self.alive
 
     def join(self, timeout: float | None = None) -> None:
         self.joins.append(timeout)
+        if self.join_error is not None:
+            raise self.join_error
 
     def stop(self) -> None:
         self.stop_calls += 1
+        if self.stop_error is not None:
+            raise self.stop_error
         if self.stops:
             self.alive = False
 
 
-class FakeTunnelProcess:
-    """Stand-in for the exact cloudflared process a session owns."""
+class FakeTunnel:
+    """Stand-in for the cloudflared process one session owns."""
 
     def __init__(self) -> None:
-        self.killed = False
-        self.reaped = False
+        self.closes = 0
+        self.close_error: BaseException | None = None
 
-    def kill(self) -> None:
-        self.killed = True
+    @property
+    def killed(self) -> bool:
+        return self.closes > 0
 
-    def wait(self) -> int:
-        self.reaped = True
-        return -9
+    def close(self) -> None:
+        self.closes += 1
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class FakeRuntime:
@@ -94,7 +122,7 @@ class FakeRuntime:
 
         self.clock = 0.0
         self.server_calls: list[dict[str, Any]] = []
-        self.tunnels: list[FakeTunnelProcess] = []
+        self.tunnels: list[FakeTunnel] = []
         self.ready_urls: list[str] = []
         self.connected: dict[str, bool] = {}
         self.opened_tunnel_ports: list[int] = []
@@ -102,8 +130,10 @@ class FakeRuntime:
         self.rendered: list[tuple[str, str | None]] = []
         self.sleeps: list[float] = []
         self.probed: list[str] = []
+        self.after_probe: Any = None
         self.quieted = 0
         self.logging_restored = 0
+        self.restore_error: BaseException | None = None
 
     def run_server(self, **kwargs: Any) -> None:
         self.server_calls.append(kwargs)
@@ -111,11 +141,10 @@ class FakeRuntime:
             self.environ["LANGGRAPH_API_URL"] = self.api_url or f"http://127.0.0.1:{kwargs['port']}"
 
     def spawn(self, target: Any) -> FakeWorker:
+        """Build a worker without starting it, the way the real one does."""
         if self.spawn_error is not None:
             raise self.spawn_error
-        target()  # the real spawn runs this on a thread; run it here to record the call
-        if self.worker.stop_calls and self.worker.stops:
-            self.worker.alive = True
+        self.worker.target = target
         return self.worker
 
     def open_tunnel(self, port: int, *, protocol: str | None = None) -> OpenedTunnel:
@@ -124,19 +153,19 @@ class FakeRuntime:
         if self.tunnel_error is not None:
             raise self.tunnel_error
         index = len(self.tunnels)
-        process = FakeTunnelProcess()
+        tunnel = FakeTunnel()
         url = self.tunnel_url
         if self.tunnel_urls:
             url = self.tunnel_urls[min(index, len(self.tunnel_urls) - 1)]
         ready_url = f"http://127.0.0.1:{20241 + index}/ready"
-        self.tunnels.append(process)
+        self.tunnels.append(tunnel)
         self.ready_urls.append(ready_url)
         self.connected[ready_url] = (
             self.tunnel_ready[index]
             if self.tunnel_ready and index < len(self.tunnel_ready)
             else True
         )
-        return OpenedTunnel(url=url, process=process, ready_url=ready_url)
+        return OpenedTunnel(url=url, port=port, ready_url=ready_url, close=tunnel.close)
 
     def drop_tunnel(self, index: int) -> None:
         """Model Cloudflare dropping a tunnel the process is still retrying."""
@@ -145,6 +174,12 @@ class FakeRuntime:
     def status(self, url: str) -> int | None:
         """Report a status the way the real one does. None means nothing answered."""
         self.probed.append(url)
+        answer = self._status(url)
+        if self.after_probe is not None:
+            self.after_probe(url)  # model something changing between two probes
+        return answer
+
+    def _status(self, url: str) -> int | None:
         if url in self.connected:  # cloudflared's own health check
             if self.status_error is not None:
                 raise self.status_error
@@ -172,6 +207,8 @@ class FakeRuntime:
 
         def restore() -> None:
             self.logging_restored += 1
+            if self.restore_error is not None:
+                raise self.restore_error
 
         return restore
 
@@ -198,3 +235,10 @@ class FakeRuntime:
 def _no_active_server() -> None:
     """Keep the module-level server and tunnel handles from leaking between tests."""
     _session._state = None
+
+
+@pytest.fixture(autouse=True)
+def _no_uvicorn_capture() -> None:
+    """Drop registrations for a fake `uvicorn` the next test will not have."""
+    _runtime._capture_sinks.clear()
+    _runtime._capture_installed = None
