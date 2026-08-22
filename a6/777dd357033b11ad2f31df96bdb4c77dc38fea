@@ -1,0 +1,40 @@
+src/langsmith_studio_nb/_session.py
+  s_ab8f0901aa0d7e::t_b37390f3a105ff 14,32-36,43-44,55,139-140,142-148,162-168,171,178-179
+  s_ab8f0901aa0d7e::t_e4095ba032dda7 122,124-126,131,151-152,155,158
+tests/conftest.py
+  s_ab8f0901aa0d7e::t_9743f4f668b74f 141-142
+  s_ab8f0901aa0d7e::t_343f9e6b4c960b 114,116,119,123-124,126-136
+  s_ab8f0901aa0d7e::t_b14e92ac995a17 61,80,91-92,94
+tests/test_session.py
+  s_ab8f0901aa0d7e::t_a07428b2e5f933 336,345,353,391-392,396,407-416,420,424,437,477-478,486-487
+tests/test_runtime.py
+  s_ab8f0901aa0d7e::t_ee90b8db469f7a 211-232,234-245,250-255,258-259,261,263,265-267,270-278,281
+README.md
+  s_ab8f0901aa0d7e::t_0c8a65cedc887b 149
+  s_ab8f0901aa0d7e::t_0efcd9f4b38dd8 151
+src/langsmith_studio_nb/_logging.py
+  s_ab8f0901aa0d7e::t_6e13efa921dd5a 26-27
+src/langsmith_studio_nb/_runtime.py
+  s_ab8f0901aa0d7e::t_89f1cf87728efd 5,8,10,16,24,27-31,59,63,323
+  s_ab8f0901aa0d7e::t_6e13efa921dd5a 142-162,164,167-184,186-190,192
+pyproject.toml
+  s_ab8f0901aa0d7e::t_0c8a65cedc887b 3
+uv.lock
+  s_ab8f0901aa0d7e::t_c3ecac3089d1ec 1089
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "a6777dd357033b11ad2f31df96bdb4c77dc38fea",
+  "prompts": {},
+  "sessions": {
+    "s_ab8f0901aa0d7e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a34ddaab-e58b-40b6-b040-a1cbde46627f",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Dariel Dato-on <293921406+darieldatoon@users.noreply.github.com>"
+    }
+  }
+}
