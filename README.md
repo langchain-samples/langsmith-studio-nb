@@ -90,11 +90,13 @@ One server, one tunnel, one link. Studio switches between the graphs without a r
 | --- | --- | --- |
 | Google Colab | `google.colab` imported | yes |
 | Kaggle | `KAGGLE_*` variables | yes |
-| Binder | `BINDER_*` variables | yes |
+| Binder | `BINDER_*` variables | yes, but see below |
 | JupyterHub | `JUPYTERHUB_*` variables | yes |
 | Local Jupyter, JupyterLab, VS Code | default | no |
 
 Tunnels use a Cloudflare quick tunnel. The `cloudflared` binary downloads itself on first use.
+
+**mybinder.org cannot tunnel.** Its network policy allows outbound TCP on ports 80, 443, 873, 1094, 1095, 4001, 9418 and 16286 only, and no UDP to the internet at all, while a tunnel needs port 7844 — UDP for the default protocol, TCP for `http2`. Cloudflare still issues a URL, since that request goes over 443, so the failure looks like a working link until Studio tries to use it; `start_studio` raises instead. The port list is [`binderhub.networkPolicy.egress.tcpPorts`](https://github.com/jupyterhub/mybinder.org-deploy/blob/main/mybinder/values.yaml) in mybinder.org's deployment, so it is theirs to change, not yours. A BinderHub you run yourself can add 7844 there.
 
 Override the choice when the guess is wrong:
 
@@ -148,7 +150,7 @@ start_studio(runtime=Runtime(status=lambda url: 200))
 - **Studio must trust the tunnel domain.** On first connect, Studio blocks hosts it does not know. Add `*.trycloudflare.com` under Advanced Settings → Allowed Domains. Use the wildcard, not the exact host Studio offers to add for you, because that hostname changes every time a tunnel opens. The list lives in your browser's local storage, so it is per user and per browser, and there is no workspace-level setting. `start_studio` prints this reminder whenever it tunnels.
 - **Restarting keeps the tunnel.** Cloudflare rate limits quick tunnels per IP address (`error code: 1015`, `429 Too Many Requests`), and every notebook on a host shares that address. A demo that restarts a few times can stop getting tunnels for a while. So a restart on the same port reuses the tunnel already running. The link does not change, and the restart takes about a second instead of five. Before reusing one, `start_studio` asks cloudflared whether it still holds a connection to Cloudflare. The process keeps running behind a URL that has stopped working when Cloudflare drops a quick tunnel, so a dead one gets replaced rather than handed back to you. `stop_studio()` gives the tunnel up, and the next `start_studio()` opens a fresh one.
 - **A failed tunnel is an error, not a link.** When `cloudflared` reports no URL, `start_studio` stops the local server and raises, rather than printing a link that can only fail to fetch.
-- **`start_studio` replaces a tunnel that never connects.** cloudflared prints a `trycloudflare.com` URL as soon as Cloudflare assigns one, before it holds a connection to carry the traffic — and on a host that blocks its egress it never gets one, retrying forever behind a URL that answers for nobody. `start_studio` asks cloudflared itself, through `/ready` on its metrics server, and opens another tunnel if this one never connects. The second attempt asks for `--protocol http2`, which rides TCP 443 instead of the UDP port 7844 the default needs, since that is the egress notebook hosts usually drop. After three it raises instead of printing a link that cannot work — every attempt spends a quick tunnel against the rate limit, so the count stays small.
+- **`start_studio` replaces a tunnel that never connects.** cloudflared prints a `trycloudflare.com` URL as soon as Cloudflare assigns one, before it holds a connection to carry the traffic — and on a host that blocks its egress it never gets one, retrying forever behind a URL that answers for nobody. `start_studio` asks cloudflared itself, through `/ready` on its metrics server, and opens another tunnel if this one never connects. The second attempt asks for `--protocol http2`, which reaches port 7844 over TCP instead of the UDP the default needs — some hosts drop one and not the other. After three it raises instead of printing a link that cannot work — every attempt spends a quick tunnel against the rate limit, so the count stays small.
 - **A tunnel URL is public and unauthenticated** for as long as the cell runs. Fine for a demo agent. Think twice with anything sensitive. The tunnel dies with the kernel.
 - **Edits need a restart.** The server registers the graph object when it boots, so re-run `start_studio()` after changing your agent. Hot reload is not available from a notebook.
 - **Colab drops idle runtimes** after roughly 90 minutes. You get a new tunnel URL after reconnecting.

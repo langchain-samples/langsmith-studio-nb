@@ -30,17 +30,18 @@ TUNNEL_FAILED = (
 TUNNEL_ERROR = "The tunnel could not be opened: "
 TUNNEL_UNREACHABLE = (
     "Opened {attempts} tunnels and cloudflared never reached Cloudflare with any of "
-    "them, so their URLs answer for nobody and Studio could not have connected. This "
-    "notebook host usually blocks the egress it needs — UDP to port 7844 for the "
-    "default protocol, TCP to 443 for the http2 one this also tried. Pass "
-    "verbose=True to see what cloudflared reported."
+    "them, so their URLs answer for nobody and Studio could not have connected. A "
+    "tunnel needs port 7844 out of this host — UDP for the default protocol, TCP for "
+    "the http2 one this also tried — and notebook hosts often allow neither. Binder "
+    "allows TCP 80, 443, 873, 1094, 1095, 4001, 9418 and 16286, and no UDP at all, so "
+    "no quick tunnel can work there. Pass verbose=True to see what cloudflared reported."
 )
 
 _API_URL_VARIABLE = "LANGGRAPH_API_URL"
 _POLL_INTERVAL = 0.5
 _JOIN_TIMEOUT = 20.0
 _TUNNEL_ATTEMPTS = 3
-_TUNNEL_FALLBACK = "http2"  # rides TCP 443, where the default rides UDP 7844
+_TUNNEL_FALLBACK = "http2"  # reaches port 7844 over TCP, where the default needs UDP
 _TUNNEL_READY_TIMEOUT = 15.0
 _TUNNEL_RETRY_PAUSE = 2.0
 
@@ -163,8 +164,8 @@ def _open_verified_tunnel(*, port: int, requested: int, runtime: Runtime) -> _Tu
 
     Every attempt spends a quick tunnel against a rate limit the whole notebook
     host shares, so the count is small and the protocol changes with it: the
-    default rides UDP, which some hosts drop outright, and `http2` rides the
-    TCP port everything else here already uses.
+    default reaches the edge over UDP, which some hosts drop outright, and
+    `http2` reaches the same port over TCP, which fewer of them do.
     """
     for attempt in range(1, _TUNNEL_ATTEMPTS + 1):
         try:
