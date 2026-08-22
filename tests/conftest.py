@@ -58,6 +58,7 @@ class FakeRuntime:
         workspace_id: str | None = "ws-1",
         tunnel_url: str = "https://x.trycloudflare.com",
         tunnel_urls: list[str] | None = None,
+        tunnel_ready: list[bool] | None = None,
         tunnel_error: Exception | None = None,
         api_url: str | None = None,
         publishes_url: bool = True,
@@ -76,6 +77,7 @@ class FakeRuntime:
         self.workspace_id_value = workspace_id
         self.tunnel_url = tunnel_url
         self.tunnel_urls = tunnel_urls
+        self.tunnel_ready = tunnel_ready
         self.tunnel_error = tunnel_error
         self.api_url = api_url
         self.publishes_url = publishes_url
@@ -86,7 +88,10 @@ class FakeRuntime:
         self.clock = 0.0
         self.server_calls: list[dict[str, Any]] = []
         self.tunnels: list[FakeTunnelProcess] = []
+        self.ready_urls: list[str] = []
+        self.connected: dict[str, bool] = {}
         self.opened_tunnel_ports: list[int] = []
+        self.opened_tunnel_protocols: list[str | None] = []
         self.rendered: list[tuple[str, str | None]] = []
         self.sleeps: list[float] = []
         self.probed: list[str] = []
@@ -106,20 +111,35 @@ class FakeRuntime:
             self.worker.alive = True
         return self.worker
 
-    def open_tunnel(self, port: int) -> OpenedTunnel:
+    def open_tunnel(self, port: int, *, protocol: str | None = None) -> OpenedTunnel:
         self.opened_tunnel_ports.append(port)
+        self.opened_tunnel_protocols.append(protocol)
         if self.tunnel_error is not None:
             raise self.tunnel_error
+        index = len(self.tunnels)
         process = FakeTunnelProcess()
         url = self.tunnel_url
         if self.tunnel_urls:
-            url = self.tunnel_urls[min(len(self.tunnels), len(self.tunnel_urls) - 1)]
+            url = self.tunnel_urls[min(index, len(self.tunnel_urls) - 1)]
+        ready_url = f"http://127.0.0.1:{20241 + index}/ready"
         self.tunnels.append(process)
-        return OpenedTunnel(url=url, process=process)
+        self.ready_urls.append(ready_url)
+        self.connected[ready_url] = (
+            self.tunnel_ready[index]
+            if self.tunnel_ready and index < len(self.tunnel_ready)
+            else True
+        )
+        return OpenedTunnel(url=url, process=process, ready_url=ready_url)
+
+    def drop_tunnel(self, index: int) -> None:
+        """Model Cloudflare dropping a tunnel the process is still retrying."""
+        self.connected[self.ready_urls[index]] = False
 
     def status(self, url: str) -> int | None:
         """Report a status the way the real one does. None means nothing answered."""
         self.probed.append(url)
+        if url in self.connected:  # cloudflared's own health check
+            return 200 if self.connected[url] else 503
         if any(url.startswith(prefix) for prefix in self.unroutable):
             return 530  # Cloudflare answering for a tunnel it cannot route
         if any(url.startswith(prefix) for prefix in self.unreachable):

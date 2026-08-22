@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 from langsmith_studio_nb._environment import detect_environment, needs_tunnel
 from langsmith_studio_nb._ports import resolve_port
-from langsmith_studio_nb._runtime import Runtime, TunnelProcess, Worker
+from langsmith_studio_nb._runtime import OpenedTunnel, Runtime, TunnelProcess, Worker
 from langsmith_studio_nb._urls import port_of, studio_url
 
 DEFAULT_GRAPH_NAME = "agent"
@@ -29,16 +29,19 @@ TUNNEL_FAILED = (
 )
 TUNNEL_ERROR = "The tunnel could not be opened: "
 TUNNEL_UNREACHABLE = (
-    "Opened {attempts} tunnels and Cloudflare could not route any of them to this "
-    "server, so Studio would not have reached it either. Quick tunnels are best "
-    "effort and some come up dead. Wait a minute and re-run this cell."
+    "Opened {attempts} tunnels and cloudflared never reached Cloudflare with any of "
+    "them, so their URLs answer for nobody and Studio could not have connected. This "
+    "notebook host usually blocks the egress it needs — UDP to port 7844 for the "
+    "default protocol, TCP to 443 for the http2 one this also tried. Pass "
+    "verbose=True to see what cloudflared reported."
 )
 
 _API_URL_VARIABLE = "LANGGRAPH_API_URL"
 _POLL_INTERVAL = 0.5
 _JOIN_TIMEOUT = 20.0
 _TUNNEL_ATTEMPTS = 3
-_TUNNEL_READY_TIMEOUT = 10.0
+_TUNNEL_FALLBACK = "http2"  # rides TCP 443, where the default rides UDP 7844
+_TUNNEL_READY_TIMEOUT = 15.0
 _TUNNEL_RETRY_PAUSE = 2.0
 
 
@@ -49,7 +52,7 @@ class _Tunnel(NamedTuple):
     port: int
     requested: int  # what the caller asked for, so asking for another port opens another tunnel
     process: TunnelProcess
-    confirmed: bool  # this host reached it once, so silence from it now means something
+    ready_url: str  # cloudflared's own health check, which needs no DNS to answer
 
 
 @dataclass(frozen=True)
@@ -116,22 +119,16 @@ def _stop(*, keep_tunnel: bool) -> _Tunnel | None:
 
 
 def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
-    """Return the tunnel a restart can keep, if it still serves `requested`.
+    """Return the tunnel a restart can keep, if it is still connected.
 
-    Ask the tunnel itself, while the server it forwards to is still up. A live
-    `cloudflared` process proves nothing. Cloudflare drops a quick tunnel on its
-    own, and a reconnect comes back under a new hostname, which leaves the
-    process running behind a URL that answers nothing.
+    A live `cloudflared` process proves nothing. Cloudflare drops a quick tunnel
+    on its own, which leaves the process retrying behind a URL that answers
+    nothing, and cloudflared is the one that knows.
     """
     if _state is None or _state.tunnel is None or _state.tunnel.requested != requested:
         return None
     tunnel = _state.tunnel
-    reached = _reached(tunnel.url, runtime=runtime)
-    if reached is not None:
-        return tunnel._replace(confirmed=True) if reached else None
-    # Nothing answered. That only rules out a tunnel this host has reached
-    # before. One it never reached is no worse off than when it opened.
-    return None if tunnel.confirmed else tunnel
+    return tunnel if _tunnel_is_up(tunnel, runtime=runtime) else None
 
 
 def _answers(url: str, *, runtime: Runtime) -> bool:
@@ -139,46 +136,47 @@ def _answers(url: str, *, runtime: Runtime) -> bool:
     return runtime.status(f"{url}/ok") == HTTPStatus.OK
 
 
-def _reached(url: str, *, runtime: Runtime) -> bool | None:
-    """Report what `url` says: True the server, False something else, None nothing."""
-    status = runtime.status(f"{url}/ok")
-    return None if status is None else status == HTTPStatus.OK
+def _tunnel_is_up(tunnel: _Tunnel | OpenedTunnel, *, runtime: Runtime) -> bool:
+    """Report whether cloudflared holds a connection to Cloudflare for this tunnel.
 
-
-def _confirm_new_tunnel(url: str, *, runtime: Runtime) -> bool | None:
-    """Wait out DNS for a verdict on a tunnel this session just opened.
-
-    A tunnel that works answers the first time, so only a tunnel in doubt costs
-    the wait. Cloudflare answers for a tunnel it cannot route, and that one is
-    worth replacing, but silence is not a verdict. A new hostname can take
-    minutes to resolve here while the browser reaches it straight away, and
-    re-opening on that guess spends a tunnel against a rate limit the whole
-    notebook host shares.
+    Ask cloudflared, not the hostname. A quick tunnel URL is handed out before
+    any connection exists and keeps resolving to nothing while cloudflared
+    retries an edge it cannot reach, and the kernel's own view of that hostname
+    is worth even less: a new one can take minutes to resolve here while the
+    browser has it at once.
     """
+    return runtime.status(tunnel.ready_url) == HTTPStatus.OK
+
+
+def _wait_for_tunnel(opened: OpenedTunnel, *, runtime: Runtime) -> bool:
+    """Report whether the tunnel connects to Cloudflare before the deadline."""
     deadline = runtime.now() + _TUNNEL_READY_TIMEOUT
-    verdict = None
     while runtime.now() < deadline:
-        verdict = _reached(url, runtime=runtime)
-        if verdict:
+        if _tunnel_is_up(opened, runtime=runtime):
             return True
         runtime.sleep(_POLL_INTERVAL)
-    return verdict
+    return False
 
 
 def _open_verified_tunnel(*, port: int, requested: int, runtime: Runtime) -> _Tunnel:
-    """Open a tunnel that answers, or raise. Never returns an unreachable URL."""
+    """Open a tunnel that is connected to Cloudflare, or raise.
+
+    Every attempt spends a quick tunnel against a rate limit the whole notebook
+    host shares, so the count is small and the protocol changes with it: the
+    default rides UDP, which some hosts drop outright, and `http2` rides the
+    TCP port everything else here already uses.
+    """
     for attempt in range(1, _TUNNEL_ATTEMPTS + 1):
         try:
-            opened = runtime.open_tunnel(port)
+            opened = runtime.open_tunnel(port, protocol=None if attempt == 1 else _TUNNEL_FALLBACK)
         except TimeoutError as error:
             # Cloudflare withheld the URL, which is what rate limiting looks
             # like. Another attempt spends another tunnel to be told the same.
             raise RuntimeError(TUNNEL_FAILED) from error
         except Exception as error:
             raise RuntimeError(f"{TUNNEL_ERROR}{error}") from error
-        confirmed = _confirm_new_tunnel(opened.url, runtime=runtime)
-        if confirmed is not False:
-            return _Tunnel(opened.url, port, requested, opened.process, confirmed is True)
+        if _wait_for_tunnel(opened, runtime=runtime):
+            return _Tunnel(opened.url, port, requested, opened.process, opened.ready_url)
         opened.process.kill()
         if attempt < _TUNNEL_ATTEMPTS:
             runtime.sleep(_TUNNEL_RETRY_PAUSE)

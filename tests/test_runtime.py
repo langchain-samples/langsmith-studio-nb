@@ -208,55 +208,77 @@ def test_capture_uvicorn_server_undo_removes_the_hook(monkeypatch):
     assert uvicorn.Server.__init__ is original
 
 
-def test_default_open_tunnel_returns_the_url_and_exact_process(monkeypatch):
-    class Future:
-        def result(self, *, timeout):
-            assert timeout == 30.0
-            return "https://x.trycloudflare.com"
+class FakeCloudflared:
+    """Stand-in for the cloudflared process, replaying what it prints."""
 
-    class Process:
-        killed = False
+    def __init__(self, lines):
+        self.stdout = iter(lines)
+        self.killed = False
 
-        def kill(self):
-            self.killed = True
+    def kill(self):
+        self.killed = True
 
-    process = Process()
-    cloudflare = _install_module(
-        monkeypatch,
-        "langgraph_api.tunneling.cloudflare",
-        start_tunnel=lambda port: types.SimpleNamespace(url=Future(), process=process),
+
+BANNER = [
+    "INF Requesting new quick Tunnel on trycloudflare.com...\n",
+    "INF |  https://x.trycloudflare.com   |\n",
+]
+
+
+def _install_cloudflared(monkeypatch, lines):
+    started = FakeCloudflared(lines)
+    commands = []
+    _install_module(
+        monkeypatch, "langgraph_api.tunneling.cloudflare", ensure_cloudflared=lambda: "/bin/cfd"
     )
-    assert cloudflare is not None
+
+    def popen(command, **kwargs):
+        commands.append(command)
+        return started
+
+    monkeypatch.setattr(_runtime.subprocess, "Popen", popen)
+    monkeypatch.setattr(_runtime.atexit, "register", lambda *a, **kw: None)
+    return started, commands
+
+
+def test_default_open_tunnel_returns_the_url_and_its_own_process(monkeypatch):
+    started, commands = _install_cloudflared(monkeypatch, BANNER)
 
     tunnel = default_open_tunnel(2024)
 
     assert tunnel.url == "https://x.trycloudflare.com"
-    assert tunnel.process is process
-    assert process.killed is False
+    assert tunnel.process is started
+    assert started.killed is False
+    assert commands[0][:4] == ["/bin/cfd", "tunnel", "--url", "http://127.0.0.1:2024"]
+    metrics = commands[0][commands[0].index("--metrics") + 1]
+    assert tunnel.ready_url == f"http://{metrics}/ready"
+    assert "--protocol" not in commands[0]
 
 
-def test_default_open_tunnel_kills_its_process_when_startup_fails(monkeypatch):
-    class Future:
-        def result(self, *, timeout):
-            raise TimeoutError
+def test_default_open_tunnel_asks_for_a_protocol_when_given_one(monkeypatch):
+    _, commands = _install_cloudflared(monkeypatch, BANNER)
 
-    class Process:
-        killed = False
+    default_open_tunnel(2024, protocol="http2")
 
-        def kill(self):
-            self.killed = True
+    assert commands[0][-2:] == ["--protocol", "http2"]
 
-    process = Process()
-    _install_module(
-        monkeypatch,
-        "langgraph_api.tunneling.cloudflare",
-        start_tunnel=lambda port: types.SimpleNamespace(url=Future(), process=process),
-    )
+
+def test_default_open_tunnel_kills_its_process_when_no_url_arrives(monkeypatch):
+    started, _ = _install_cloudflared(monkeypatch, ["INF nothing useful here\n"])
 
     with pytest.raises(TimeoutError):
+        default_open_tunnel(2024, timeout=0.2)
+
+    assert started.killed is True
+
+
+def test_default_open_tunnel_logs_what_cloudflared_says(monkeypatch, caplog):
+    _install_cloudflared(monkeypatch, BANNER)
+
+    with caplog.at_level(logging.INFO, logger=_runtime.TUNNEL_LOGGER):
         default_open_tunnel(2024)
 
-    assert process.killed is True
+    assert any("Requesting new quick Tunnel" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("status", [200, 503])

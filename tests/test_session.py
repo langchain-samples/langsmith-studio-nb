@@ -333,7 +333,7 @@ def test_start_studio_opens_a_new_tunnel_when_the_old_one_stopped_answering():
 
     fake.tunnel_urls = ["https://dropped.trycloudflare.com", "https://fresh.trycloudflare.com"]
     start_studio(runtime=runtime)
-    fake.unreachable = ("https://dropped.trycloudflare.com",)
+    fake.drop_tunnel(0)
     session = start_studio(runtime=runtime)
 
     assert fake.server_calls[1]["tunnel"] is False
@@ -342,7 +342,7 @@ def test_start_studio_opens_a_new_tunnel_when_the_old_one_stopped_answering():
     assert session.api_url == "https://fresh.trycloudflare.com"
 
 
-def test_start_studio_asks_the_tunnel_itself_before_keeping_it():
+def test_start_studio_asks_cloudflared_before_keeping_its_tunnel():
     fake = _tunneling_runtime()
     runtime = fake.build()
 
@@ -350,7 +350,7 @@ def test_start_studio_asks_the_tunnel_itself_before_keeping_it():
     fake.probed.clear()
     start_studio(runtime=runtime)
 
-    assert fake.probed[0] == "https://x.trycloudflare.com/ok"
+    assert fake.probed[0] == fake.ready_urls[0]
 
 
 def test_start_studio_drops_a_tunnel_whose_port_was_taken():
@@ -388,12 +388,12 @@ def test_start_studio_remembers_no_tunnel_when_serving_directly():
     assert _session._state.tunnel is None
 
 
-def test_start_studio_replaces_a_tunnel_that_comes_up_dead():
-    """Some quick tunnels never route; hand back one that answered, not the first one."""
+def test_start_studio_replaces_a_tunnel_that_never_connects():
+    """cloudflared hands out the URL before it reaches Cloudflare, and may never reach it."""
     fake = FakeRuntime(
         modules=("google.colab",),
         tunnel_urls=["https://dead.trycloudflare.com", "https://live.trycloudflare.com"],
-        unroutable=("https://dead.trycloudflare.com",),
+        tunnel_ready=[False, True],
         tick=3.0,
     )
 
@@ -404,15 +404,24 @@ def test_start_studio_replaces_a_tunnel_that_comes_up_dead():
     assert fake.opened_tunnel_ports == [2024, 2024]
 
 
-def test_start_studio_gives_up_after_three_dead_tunnels():
+def test_start_studio_falls_back_to_http2_after_the_default_protocol_fails():
+    """The default rides UDP, which notebook hosts drop; http2 rides TCP 443."""
+    fake = FakeRuntime(modules=("google.colab",), tunnel_ready=[False, True], tick=3.0)
+
+    start_studio(runtime=fake.build())
+
+    assert fake.opened_tunnel_protocols == [None, "http2"]
+
+
+def test_start_studio_gives_up_after_three_tunnels_that_never_connect():
     """Better an error than a link that cannot work; each attempt costs a tunnel."""
     fake = FakeRuntime(
         modules=("google.colab",),
-        unroutable=("https://x.trycloudflare.com",),
+        tunnel_ready=[False, False, False],
         tick=3.0,
     )
 
-    with pytest.raises(RuntimeError, match="could not route any of them"):
+    with pytest.raises(RuntimeError, match="never reached Cloudflare"):
         start_studio(runtime=fake.build())
 
     assert len(fake.tunnels) == 3
@@ -425,7 +434,7 @@ def test_start_studio_gives_up_after_three_dead_tunnels():
 def test_start_studio_waits_between_tunnel_attempts():
     fake = FakeRuntime(
         modules=("google.colab",),
-        unroutable=("https://x.trycloudflare.com",),
+        tunnel_ready=[False, False, False],
         tick=3.0,
     )
 
@@ -465,50 +474,17 @@ def test_start_studio_falls_back_to_the_port_it_asked_for():
     assert fake.opened_tunnel_ports == [2024]
 
 
-def test_start_studio_keeps_a_new_tunnel_this_host_cannot_reach_itself():
-    """A new hostname can lag in the kernel's resolver while the browser has it."""
-    fake = FakeRuntime(
-        modules=("google.colab",),
-        unreachable=("https://x.trycloudflare.com",),
-        tick=3.0,
-    )
-
-    session = start_studio(runtime=fake.build())
-
-    assert session.api_url == "https://x.trycloudflare.com"
-    assert len(fake.tunnels) == 1
-    assert fake.tunnels[0].killed is False
-
-
-def test_restart_keeps_a_tunnel_this_host_could_never_reach():
-    """Silence rules out only a tunnel this host has reached before."""
-    fake = FakeRuntime(
-        modules=("google.colab",),
-        unreachable=("https://x.trycloudflare.com",),
-        tick=3.0,
-    )
-    runtime = fake.build()
-
-    start_studio(runtime=runtime)
-    session = start_studio(runtime=runtime)
-
-    assert len(fake.tunnels) == 1
-    assert session.api_url == "https://x.trycloudflare.com"
-
-
-def test_restart_replaces_an_unconfirmed_tunnel_that_cloudflare_disowns():
-    """Once something answers for it, the answer decides."""
+def test_restart_replaces_a_tunnel_cloudflare_dropped():
+    """cloudflared keeps running and keeps its URL, connected to nothing."""
     fake = FakeRuntime(
         modules=("google.colab",),
         tunnel_urls=["https://first.trycloudflare.com", "https://second.trycloudflare.com"],
-        unreachable=("https://first.trycloudflare.com",),
         tick=3.0,
     )
     runtime = fake.build()
-
     start_studio(runtime=runtime)
-    fake.unreachable = ()
-    fake.unroutable = ("https://first.trycloudflare.com",)
+    fake.drop_tunnel(0)
+
     session = start_studio(runtime=runtime)
 
     assert fake.tunnels[0].killed is True

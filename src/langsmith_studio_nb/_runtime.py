@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+import re
 import socket
+import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -17,8 +21,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Container, MutableMapping
 
 from langsmith_studio_nb._environment import NotebookEnvironment, detect_environment
-from langsmith_studio_nb._logging import silence_loggers
+from langsmith_studio_nb._logging import TUNNEL_LOGGER, silence_loggers
 from langsmith_studio_nb._render import link_html, link_text
+
+DEFAULT_TUNNEL_HOST = "127.0.0.1"
+_TUNNEL_URL = re.compile(r"(https://[A-Za-z0-9.-]+\.trycloudflare\.com)")
+
+tunnel_logger = logging.getLogger(TUNNEL_LOGGER)
 
 
 class Worker(Protocol):
@@ -47,10 +56,11 @@ class TunnelProcess(Protocol):
 
 @dataclass(frozen=True)
 class OpenedTunnel:
-    """A Cloudflare tunnel by its public URL and owned process."""
+    """A Cloudflare tunnel by its public URL, owned process, and health check."""
 
     url: str
     process: TunnelProcess
+    ready_url: str
 
 
 def default_run_server(**kwargs: Any) -> None:  # noqa: ANN401 - forwards run_server's own options
@@ -129,19 +139,58 @@ def default_spawn(target: Callable[[], None]) -> Worker:
     return _ThreadWorker(target)
 
 
-def default_open_tunnel(port: int, *, timeout: float = 30.0) -> OpenedTunnel:
-    """Open a Cloudflare quick tunnel and retain its exact process."""
+def _publish_tunnel_url(stream: Any, url: Future[str]) -> None:  # noqa: ANN401 - a text pipe
+    """Log everything cloudflared says, and take the tunnel URL from it."""
+    for line in stream:
+        text = line.rstrip()
+        tunnel_logger.info("[cloudflared] %s", text)
+        found = _TUNNEL_URL.search(text)
+        if found and not url.done():
+            url.set_result(found.group(1))
+
+
+def default_open_tunnel(
+    port: int, *, protocol: str | None = None, timeout: float = 30.0
+) -> OpenedTunnel:
+    """Open a Cloudflare quick tunnel to `port` and retain its exact process.
+
+    Started here rather than through `langgraph_api`, which exposes no options,
+    to ask cloudflared for a metrics address. Its `/ready` reports whether the
+    tunnel holds a connection to Cloudflare, which neither the process nor the
+    hostname reveals: cloudflared retries a blocked edge forever, and the
+    hostname it printed answers for nobody in the meantime.
+    """
     from langgraph_api.tunneling.cloudflare import (  # noqa: PLC0415 - optional side effect
-        start_tunnel,
+        ensure_cloudflared,
     )
 
-    tunnel = start_tunnel(port)
+    metrics_port = default_find_free_port()
+    command = [
+        str(ensure_cloudflared()),
+        "tunnel",
+        "--url",
+        f"http://{DEFAULT_TUNNEL_HOST}:{port}",
+        "--metrics",
+        f"{DEFAULT_TUNNEL_HOST}:{metrics_port}",
+    ]
+    if protocol is not None:
+        command += ["--protocol", protocol]
+
+    process = subprocess.Popen(  # noqa: S603 - fixed arguments, binary from langgraph_api
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+    )
+    atexit.register(process.kill)
+    url: Future[str] = Future()
+    threading.Thread(target=_publish_tunnel_url, args=(process.stdout, url), daemon=True).start()
     try:
-        url = tunnel.url.result(timeout=timeout)
+        return OpenedTunnel(
+            url=url.result(timeout=timeout),
+            process=process,
+            ready_url=f"http://{DEFAULT_TUNNEL_HOST}:{metrics_port}/ready",
+        )
     except BaseException:
-        tunnel.process.kill()
+        process.kill()
         raise
-    return OpenedTunnel(url=url, process=tunnel.process)
 
 
 def default_status(url: str, *, timeout: float = 5.0) -> int | None:
@@ -271,7 +320,7 @@ class Runtime:
 
     run_server: Callable[..., None] = default_run_server
     spawn: Callable[[Callable[[], None]], Worker] = default_spawn
-    open_tunnel: Callable[[int], OpenedTunnel] = default_open_tunnel
+    open_tunnel: Callable[..., OpenedTunnel] = default_open_tunnel
     status: Callable[[str], int | None] = default_status
     port_is_free: Callable[[int], bool] = default_port_is_free
     find_free_port: Callable[[], int] = default_find_free_port

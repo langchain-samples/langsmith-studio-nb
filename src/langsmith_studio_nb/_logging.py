@@ -23,6 +23,8 @@ class Leveled(Protocol):
         ...
 
 
+TUNNEL_LOGGER = "langsmith_studio_nb.tunnel"
+
 NOISY_LOGGERS = (
     "blockbuster",
     "httpx",
