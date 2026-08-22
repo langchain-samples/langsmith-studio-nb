@@ -18,8 +18,11 @@ classifiers = [
 ]
 # IPython is deliberately absent. Every notebook already has one, and depending
 # on it upgrades Colab out from under `google-colab`.
+# Bounded on purpose. This package calls langgraph_api's run_server and its
+# cloudflared helper, neither of which is public API, so a major bump is
+# something to test rather than to accept.
 dependencies = [
-    "langgraph-cli[inmem]>=0.4.31",
+    "langgraph-cli[inmem]>=0.4.31,<0.5",
 ]
 
 [project.urls]

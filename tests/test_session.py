@@ -485,3 +485,17 @@ def test_restart_replaces_a_tunnel_cloudflare_dropped():
 
     assert fake.tunnels[0].killed is True
     assert session.api_url == "https://second.trycloudflare.com"
+
+
+def test_start_studio_closes_a_tunnel_it_was_interrupted_while_checking():
+    """Nothing owns the process yet, so a Ctrl-C here would strand it."""
+    fake = FakeRuntime(in_colab=True)
+    runtime = fake.build()
+    fake.status_error = KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        start_studio(runtime=runtime)
+
+    assert fake.tunnels[0].killed is True
+    assert fake.tunnels[0].reaped is True
+    assert _session._state is None

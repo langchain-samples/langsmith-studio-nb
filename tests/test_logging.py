@@ -42,3 +42,21 @@ def test_silence_loggers_applies_before_import():
     silence_loggers(logging.ERROR, names=[name])
 
     assert logging.getLogger(name).level == logging.ERROR
+
+
+def test_silence_loggers_puts_the_root_logger_back(monkeypatch):
+    """Importing the server calls basicConfig, which a notebook never asked for."""
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", logging.WARNING)
+
+    restore = silence_loggers(logging.ERROR)
+    logging.basicConfig(level=logging.INFO)  # what langgraph_api does as it imports
+
+    assert root.level == logging.INFO
+    assert root.handlers != []
+
+    restore()
+
+    assert root.level == logging.WARNING
+    assert root.handlers == []

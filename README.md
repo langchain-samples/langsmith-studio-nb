@@ -26,6 +26,8 @@ Requires Python 3.11+. `langgraph-cli[inmem]` comes with it, so this is the only
 %pip install -q git+https://github.com/langchain-samples/langsmith-studio-nb.git deepagents langchain-openai
 ```
 
+On Colab, add both keys under the 🔑 **Secrets** panel in the left sidebar with **Notebook access** on, and read them from there:
+
 ```python
 import os
 
@@ -36,7 +38,7 @@ os.environ["LANGSMITH_API_KEY"] = userdata.get("LANGSMITH_API_KEY")
 os.environ["LANGSMITH_TRACING"] = "true"
 ```
 
-Add both keys under the 🔑 **Secrets** panel in Colab's left sidebar, with **Notebook access** on.
+There is no `userdata` in your own Jupyter, so export those three variables before you start it instead.
 
 ```python
 from deepagents import create_deep_agent
@@ -68,7 +70,7 @@ Edit the agent and re-run the last two cells to pick up your changes. `start_stu
 
 [**examples/deep_agent_in_studio.ipynb**](examples/deep_agent_in_studio.ipynb) is the quickstart above as a runnable notebook, plus the two things Colab adds: where to keep your API keys, and the one Studio setting a tunnel needs. It runs top to bottom there, and in your own Jupyter.
 
-The keys come from Colab's 🔑 Secrets panel. Running your own Jupyter, they come from the environment, or from a `.env` file beside the notebook, which you make with `cd examples && cp .env.example .env`. The template sits next to the notebook, because the keys belong to the example rather than to the package.
+The keys come from Colab's 🔑 Secrets panel. Running your own Jupyter, they come from the environment, or from a `.env` file you make with `cd examples && cp .env.example .env`. The template sits next to the notebook, because the keys belong to the example rather than to the package. The notebook calls `load_dotenv()`, which searches the kernel's working directory and then its parents, so keep the `.env` in `examples/` and start Jupyter there or anywhere below the repository root.
 
 ## Several agents at once
 

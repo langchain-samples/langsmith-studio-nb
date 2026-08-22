@@ -36,9 +36,14 @@ class FakeTunnelProcess:
 
     def __init__(self) -> None:
         self.killed = False
+        self.reaped = False
 
     def kill(self) -> None:
         self.killed = True
+
+    def wait(self) -> int:
+        self.reaped = True
+        return -9
 
 
 class FakeRuntime:
@@ -51,6 +56,7 @@ class FakeRuntime:
         environ: dict[str, str] | None = None,
         in_colab: bool = False,
         statuses: list[int | None] | None = None,
+        status_error: BaseException | None = None,
         unroutable: tuple[str, ...] = (),
         unreachable: tuple[str, ...] = (),
         worker: FakeWorker | None = None,
@@ -70,6 +76,7 @@ class FakeRuntime:
         self.environ = dict(environ or {})
         self.in_colab_value = in_colab
         self.statuses = statuses
+        self.status_error = status_error
         self.unroutable = unroutable
         self.unreachable = unreachable
         self.worker = worker or FakeWorker()
@@ -139,6 +146,8 @@ class FakeRuntime:
         """Report a status the way the real one does. None means nothing answered."""
         self.probed.append(url)
         if url in self.connected:  # cloudflared's own health check
+            if self.status_error is not None:
+                raise self.status_error
             return 200 if self.connected[url] else 503
         if any(url.startswith(prefix) for prefix in self.unroutable):
             return 530  # Cloudflare answering for a tunnel it cannot route

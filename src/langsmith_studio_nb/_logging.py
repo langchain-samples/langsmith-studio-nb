@@ -23,6 +23,19 @@ class Leveled(Protocol):
         ...
 
 
+def _restore_root(level: int, handlers: list[logging.Handler]) -> None:
+    """Undo what importing the server did to the root logger.
+
+    `langgraph_api` calls `logging.basicConfig(INFO)` as it imports, which lowers
+    the root level and attaches a handler to a notebook that asked for neither.
+    """
+    root = logging.getLogger()
+    root.setLevel(level)
+    for handler in root.handlers[:]:
+        if handler not in handlers:
+            root.removeHandler(handler)
+
+
 TUNNEL_LOGGER = "langsmith_studio_nb.tunnel"
 
 NOISY_LOGGERS = (
@@ -34,6 +47,7 @@ NOISY_LOGGERS = (
     "langgraph_runtime_inmem",
     "uvicorn",
     "uvicorn.error",
+    TUNNEL_LOGGER,
 )
 
 
@@ -49,14 +63,17 @@ def silence_loggers(
     placeholder whose level survives the real module's import, and `langgraph_api`
     calls `logging.basicConfig(INFO)` at import time.
     """
+    root = logging.getLogger()
+    root_level, root_handlers = root.level, root.handlers[:]
     loggers = [get_logger(name) for name in names]
     previous = [logger.level for logger in loggers]
     for logger in loggers:
         logger.setLevel(level)
 
     def restore() -> None:
-        """Restore every logger to the level it had before this call."""
+        """Put every level, and the root logger, back the way it was."""
         for logger, previous_level in zip(loggers, previous, strict=True):
             logger.setLevel(previous_level)
+        _restore_root(root_level, root_handlers)
 
     return restore

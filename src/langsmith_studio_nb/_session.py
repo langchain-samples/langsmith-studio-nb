@@ -111,10 +111,16 @@ def _stop(*, keep_tunnel: bool) -> _Tunnel | None:
     kept = state.tunnel if keep_tunnel else None
     try:
         if state.tunnel is not None and kept is None:
-            state.tunnel.process.kill()
+            _close(state.tunnel.process)
     finally:
         state.restore_logging()
     return kept
+
+
+def _close(process: TunnelProcess) -> None:
+    """Stop cloudflared and reap it, so a long session collects no zombies."""
+    process.kill()
+    process.wait()
 
 
 def _reusable_tunnel(*, requested: int, runtime: Runtime) -> _Tunnel | None:
@@ -174,9 +180,15 @@ def _open_verified_tunnel(*, port: int, requested: int, runtime: Runtime) -> _Tu
             raise RuntimeError(TUNNEL_FAILED) from error
         except Exception as error:
             raise RuntimeError(f"{TUNNEL_ERROR}{error}") from error
-        if _wait_for_tunnel(opened, runtime=runtime):
+        try:
+            connected = _wait_for_tunnel(opened, runtime=runtime)
+        except BaseException:
+            # Nothing owns this process yet, so an interrupt here strands it.
+            _close(opened.process)
+            raise
+        if connected:
             return _Tunnel(opened.url, port, requested, opened.process, opened.ready_url)
-        opened.process.kill()
+        _close(opened.process)
         if attempt < _TUNNEL_ATTEMPTS:
             runtime.sleep(_TUNNEL_RETRY_PAUSE)
     raise RuntimeError(TUNNEL_UNREACHABLE.format(attempts=_TUNNEL_ATTEMPTS))
@@ -277,7 +289,7 @@ def start_studio(
         )
     except BaseException:
         if reused is not None:
-            reused.process.kill()
+            _close(reused.process)
         raise
     _state = _SessionState(worker=worker, tunnel=reused, restore_logging=restore_logging)
     try:
@@ -288,7 +300,7 @@ def start_studio(
         if tunnel:
             if reused is not None and reused.port != bound:
                 # The server moved; the tunnel still forwards to where it was.
-                reused.process.kill()
+                _close(reused.process)
                 reused = None
             if reused is None:
                 reused = _open_verified_tunnel(port=bound, requested=requested, runtime=runtime)

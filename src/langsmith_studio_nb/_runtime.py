@@ -52,6 +52,10 @@ class TunnelProcess(Protocol):
         """Terminate the process."""
         ...
 
+    def wait(self) -> int:
+        """Reap the terminated process and return its status."""
+        ...
+
 
 @dataclass(frozen=True)
 class OpenedTunnel:
@@ -69,13 +73,18 @@ def default_run_server(**kwargs: Any) -> None:  # noqa: ANN401 - forwards run_se
     run_server(**kwargs)
 
 
-def capture_uvicorn_server(sink: Callable[[Any], None]) -> Callable[[], None]:
-    """Hand `sink` the next Uvicorn server this process builds. Returns an undo.
+def capture_uvicorn_server(
+    sink: Callable[[Any], None], *, thread: threading.Thread
+) -> Callable[[], None]:
+    """Hand `sink` the next Uvicorn server `thread` builds. Returns an undo.
 
     `run_server` owns `uvicorn.run`, which builds the server and blocks, so the
     only handle on it is the one taken as it is built. Do not go looking for the
     object instead. A search of the kernel finds servers this session does not
     own, and one over `sys._current_frames()` races the frames it walks.
+
+    Scoped to one thread because the hook it installs is process-wide: a server
+    another thread happens to build while this one starts up is not ours to stop.
     """
     import uvicorn  # noqa: PLC0415 - imported by the server, not by this package
 
@@ -83,15 +92,15 @@ def capture_uvicorn_server(sink: Callable[[Any], None]) -> Callable[[], None]:
 
     def capture(server: Any, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401 - forwards uvicorn's own arguments
         original(server, *args, **kwargs)
-        uvicorn.Server.__init__ = original  # one server per session; take the first
-        sink(server)
-
-    uvicorn.Server.__init__ = capture
+        if threading.current_thread() is thread:
+            undo()  # one server per session; take the first
+            sink(server)
 
     def undo() -> None:
         if uvicorn.Server.__init__ is capture:
             uvicorn.Server.__init__ = original
 
+    uvicorn.Server.__init__ = capture
     return undo
 
 
@@ -101,8 +110,8 @@ class _ThreadWorker:
     def __init__(self, target: Callable[[], None]) -> None:
         self._server: Any = None
         self._stopping = False
-        self._undo_capture = capture_uvicorn_server(self._captured)
         self._thread = threading.Thread(target=target, daemon=True)
+        self._undo_capture = capture_uvicorn_server(self._captured, thread=self._thread)
         self._thread.start()
 
     def _captured(self, server: Any) -> None:  # noqa: ANN401 - uvicorn's server object
@@ -138,14 +147,24 @@ def default_spawn(target: Callable[[], None]) -> Worker:
     return _ThreadWorker(target)
 
 
-def _publish_tunnel_url(stream: Any, url: Future[str]) -> None:  # noqa: ANN401 - a text pipe
-    """Log everything cloudflared says, and take the tunnel URL from it."""
-    for line in stream:
+def _publish_tunnel_url(process: Any, url: Future[str]) -> None:  # noqa: ANN401 - a Popen
+    """Log everything cloudflared says, and take the tunnel URL from it.
+
+    Ends by reporting how the process died when it never named a URL, so that a
+    cloudflared which exits at once is not left to look like a slow one.
+    """
+    last = ""
+    for line in process.stdout:
         text = line.rstrip()
         tunnel_logger.info("[cloudflared] %s", text)
+        last = text or last
         found = _TUNNEL_URL.search(text)
         if found and not url.done():
             url.set_result(found.group(1))
+    if not url.done():
+        url.set_exception(
+            RuntimeError(f"cloudflared exited with status {process.wait()}. {last}".strip())
+        )
 
 
 def default_open_tunnel(
@@ -180,7 +199,7 @@ def default_open_tunnel(
     )
     atexit.register(process.kill)
     url: Future[str] = Future()
-    threading.Thread(target=_publish_tunnel_url, args=(process.stdout, url), daemon=True).start()
+    threading.Thread(target=_publish_tunnel_url, args=(process, url), daemon=True).start()
     try:
         return OpenedTunnel(
             url=url.result(timeout=timeout),
@@ -189,6 +208,7 @@ def default_open_tunnel(
         )
     except BaseException:
         process.kill()
+        process.wait()  # reap it here; nothing owns this one yet
         raise
 
 

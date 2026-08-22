@@ -157,7 +157,7 @@ def test_capture_uvicorn_server_restores_uvicorn_after_one_server(monkeypatch):
     original = uvicorn.Server.__init__
     captured = []
 
-    capture_uvicorn_server(captured.append)
+    capture_uvicorn_server(captured.append, thread=threading.current_thread())
     first = uvicorn.Server()
 
     assert captured == [first]
@@ -168,12 +168,27 @@ def test_capture_uvicorn_server_restores_uvicorn_after_one_server(monkeypatch):
     assert captured == [first]
 
 
+def test_capture_uvicorn_server_ignores_another_thread(monkeypatch):
+    """The hook is process-wide; a server someone else builds is not ours to stop."""
+    uvicorn = _install_uvicorn(monkeypatch)
+    captured = []
+    theirs = []
+
+    capture_uvicorn_server(captured.append, thread=threading.Thread(target=lambda: None))
+    elsewhere = threading.Thread(target=lambda: theirs.append(uvicorn.Server()))
+    elsewhere.start()
+    elsewhere.join(5)
+
+    assert captured == []
+    assert theirs[0].should_exit is False  # built normally, just not taken
+
+
 def test_capture_uvicorn_server_undo_removes_the_hook(monkeypatch):
     uvicorn = _install_uvicorn(monkeypatch)
     original = uvicorn.Server.__init__
     captured = []
 
-    undo = capture_uvicorn_server(captured.append)
+    undo = capture_uvicorn_server(captured.append, thread=threading.current_thread())
     undo()
     undo()  # idempotent: the hook is already gone
     uvicorn.Server()
@@ -185,12 +200,18 @@ def test_capture_uvicorn_server_undo_removes_the_hook(monkeypatch):
 class FakeCloudflared:
     """Stand-in for the cloudflared process, replaying what it prints."""
 
-    def __init__(self, lines):
+    def __init__(self, lines, status=0):
         self.stdout = iter(lines)
+        self.status = status
         self.killed = False
+        self.reaped = False
 
     def kill(self):
         self.killed = True
+
+    def wait(self):
+        self.reaped = True
+        return self.status
 
 
 BANNER = [
@@ -199,8 +220,8 @@ BANNER = [
 ]
 
 
-def _install_cloudflared(monkeypatch, lines):
-    started = FakeCloudflared(lines)
+def _install_cloudflared(monkeypatch, lines, status=0):
+    started = FakeCloudflared(lines, status)
     commands = []
     _install_module(
         monkeypatch, "langgraph_api.tunneling.cloudflare", ensure_cloudflared=lambda: "/bin/cfd"
@@ -237,13 +258,43 @@ def test_default_open_tunnel_asks_for_a_protocol_when_given_one(monkeypatch):
     assert commands[0][-2:] == ["--protocol", "http2"]
 
 
-def test_default_open_tunnel_kills_its_process_when_no_url_arrives(monkeypatch):
-    started, _ = _install_cloudflared(monkeypatch, ["INF nothing useful here\n"])
+def test_default_open_tunnel_reports_a_cloudflared_that_exits(monkeypatch):
+    """Waiting out the timeout would report this as Cloudflare rate limiting."""
+    started, _ = _install_cloudflared(
+        monkeypatch, ["ERR failed to request quick Tunnel\n"], status=1
+    )
 
-    with pytest.raises(TimeoutError):
-        default_open_tunnel(2024, timeout=0.2)
+    with pytest.raises(RuntimeError, match=r"exited with status 1\. ERR failed to request"):
+        default_open_tunnel(2024, timeout=30.0)
 
     assert started.killed is True
+
+
+class BlockingStdout:
+    """A pipe that stays open and silent, the way a stuck cloudflared does."""
+
+    def __init__(self, released):
+        self._released = released
+
+    def __iter__(self):
+        self._released.wait(5)
+        return iter(())
+
+
+def test_default_open_tunnel_kills_its_process_when_no_url_arrives(monkeypatch):
+    """A process that says nothing and stays up has to be timed out."""
+    released = threading.Event()
+    started, _ = _install_cloudflared(monkeypatch, [])
+    started.stdout = BlockingStdout(released)
+
+    try:
+        with pytest.raises(TimeoutError):
+            default_open_tunnel(2024, timeout=0.2)
+    finally:
+        released.set()
+
+    assert started.killed is True
+    assert started.reaped is True
 
 
 def test_default_open_tunnel_logs_what_cloudflared_says(monkeypatch, caplog):

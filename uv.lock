@@ -1102,7 +1102,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4.31" }]
+requires-dist = [{ name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4.31,<0.5" }]
 
 [package.metadata.requires-dev]
 dev = [

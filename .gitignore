@@ -9,9 +9,15 @@ wheels/
 # Virtual environments
 .venv
 
-# API keys for the example notebooks; the committed template is examples/.env.example.
-# Unanchored on purpose. This catches a .env at any depth, not just the expected one.
+# API keys and anything else that looks like a credential. Unanchored on purpose:
+# this catches them at any depth, not just where the example keeps them.
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+secrets.json
 
 .coverage
 .pytest_cache/
