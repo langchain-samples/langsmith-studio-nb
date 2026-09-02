@@ -34,12 +34,13 @@ TUNNEL_FAILED = (
 )
 TUNNEL_ERROR = "The tunnel could not be opened: "
 TUNNEL_UNREACHABLE = (
-    "Opened {attempts} tunnels and cloudflared never reached Cloudflare with any of "
-    "them, so their URLs answer for nobody and Studio could not have connected. A "
-    "tunnel needs port 7844 out of this runtime, UDP for the default protocol and TCP "
-    "for the http2 one this also tried, and some runtimes allow neither. Runtime "
-    "\N{RIGHTWARDS ARROW} Disconnect and delete runtime, then reconnect, usually lands "
-    "on one that does. Pass verbose=True to see what cloudflared reported."
+    "Opened {attempts} tunnels and none served the agent server through its public URL, "
+    "so Studio could not have connected. cloudflared must both reach Cloudflare and "
+    "carry an /ok request back to this runtime. A tunnel needs port 7844 out of this "
+    "runtime, UDP for the default protocol and TCP for the http2 one this also tried, "
+    "and some runtimes allow neither. Runtime \N{RIGHTWARDS ARROW} Disconnect and delete "
+    "runtime, then reconnect, usually lands on one that does. Pass verbose=True to see "
+    "what cloudflared reported."
 )
 
 _API_URL_VARIABLE = "LANGGRAPH_API_URL"
@@ -161,11 +162,11 @@ def _has_reusable_tunnel(*, requested: int, runtime: Runtime) -> bool:
 
     A live `cloudflared` process proves nothing. Cloudflare drops a quick tunnel
     on its own, which leaves the process retrying behind a URL that answers
-    nothing, and cloudflared is the one that knows.
+    nothing. Require both its edge connection and a public request through it.
     """
     if _state is None or _state.tunnel is None or _state.requested_port != requested:
         return False
-    return _tunnel_is_up(_state.tunnel, runtime=runtime)
+    return _tunnel_serves_agent(_state.tunnel, runtime=runtime)
 
 
 def _answers(url: str, *, runtime: Runtime) -> bool:
@@ -185,18 +186,23 @@ def _tunnel_is_up(tunnel: OpenedTunnel, *, runtime: Runtime) -> bool:
     return runtime.status(tunnel.ready_url) == HTTPStatus.OK
 
 
+def _tunnel_serves_agent(tunnel: OpenedTunnel, *, runtime: Runtime) -> bool:
+    """Report whether the public tunnel reaches the agent server right now."""
+    return _tunnel_is_up(tunnel, runtime=runtime) and _answers(tunnel.url, runtime=runtime)
+
+
 def _still_serves(tunnel: OpenedTunnel, *, bound: int, runtime: Runtime) -> bool:
     """Report whether `tunnel` reaches the server on `bound` and is up right now."""
-    return tunnel_still_reaches(tunnel_port=tunnel.port, bound_port=bound) and _tunnel_is_up(
+    return tunnel_still_reaches(tunnel_port=tunnel.port, bound_port=bound) and _tunnel_serves_agent(
         tunnel, runtime=runtime
     )
 
 
 def _wait_for_tunnel(opened: OpenedTunnel, *, runtime: Runtime) -> bool:
-    """Report whether the tunnel connects to Cloudflare before the deadline."""
+    """Report whether the public tunnel serves the agent before the deadline."""
     deadline = runtime.now() + _TUNNEL_READY_TIMEOUT
     while runtime.now() < deadline:
-        if _tunnel_is_up(opened, runtime=runtime):
+        if _tunnel_serves_agent(opened, runtime=runtime):
             return True
         runtime.sleep(_POLL_INTERVAL)
     return False
@@ -205,7 +211,7 @@ def _wait_for_tunnel(opened: OpenedTunnel, *, runtime: Runtime) -> bool:
 def _open_verified_tunnel(
     state: _SessionState, *, port: int, runtime: Runtime
 ) -> tuple[_SessionState, OpenedTunnel]:
-    """Own a tunnel that is connected to Cloudflare, or raise.
+    """Own a tunnel that publicly serves the agent server, or raise.
 
     Walks `TUNNEL_PROTOCOLS` once each. Both the count and the order are a
     rate limit this host shares, spelled out there. The session takes ownership

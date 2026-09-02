@@ -343,6 +343,37 @@ def test_start_studio_opens_a_new_tunnel_when_the_old_one_stopped_answering():
     assert session.api_url == "https://fresh.trycloudflare.com"
 
 
+def test_start_studio_replaces_a_connected_tunnel_that_does_not_serve_the_agent():
+    fake = FakeRuntime(
+        in_colab=True,
+        tunnel_urls=["https://broken.trycloudflare.com", "https://working.trycloudflare.com"],
+        unroutable=("https://broken.trycloudflare.com",),
+        tick=3.0,
+    )
+
+    session = start_studio(runtime=fake.build())
+
+    assert session.api_url == "https://working.trycloudflare.com"
+    assert [tunnel.killed for tunnel in fake.tunnels] == [True, False]
+    assert "https://broken.trycloudflare.com/ok" in fake.probed
+
+
+def test_start_studio_does_not_reuse_a_connected_tunnel_that_stopped_serving_the_agent():
+    fake = FakeRuntime(
+        in_colab=True,
+        tunnel_urls=["https://broken.trycloudflare.com", "https://working.trycloudflare.com"],
+        tick=3.0,
+    )
+    runtime = fake.build()
+    start_studio(runtime=runtime)
+    fake.unroutable = ("https://broken.trycloudflare.com",)
+
+    session = start_studio(runtime=runtime)
+
+    assert session.api_url == "https://working.trycloudflare.com"
+    assert [tunnel.killed for tunnel in fake.tunnels] == [True, False]
+
+
 def test_start_studio_asks_cloudflared_before_keeping_its_tunnel():
     fake = _tunneling_runtime()
     runtime = fake.build()
@@ -418,7 +449,7 @@ def test_start_studio_spends_one_tunnel_per_route_and_no_more():
     """Better an error than a link that cannot work, and a repeat buys no new route."""
     fake = FakeRuntime(in_colab=True, tunnel_ready=[False, False], tick=3.0)
 
-    with pytest.raises(RuntimeError, match="never reached Cloudflare"):
+    with pytest.raises(RuntimeError, match="served the agent server"):
         start_studio(runtime=fake.build())
 
     assert fake.opened_tunnel_protocols == [None, "http2"]
@@ -426,6 +457,21 @@ def test_start_studio_spends_one_tunnel_per_route_and_no_more():
     assert fake.rendered == []
     assert _session._state is None
     assert fake.logging_restored == 1
+
+
+def test_start_studio_rejects_connected_tunnels_when_their_public_urls_do_not_answer():
+    fake = FakeRuntime(
+        in_colab=True,
+        unreachable=("https://x.trycloudflare.com",),
+        tick=3.0,
+    )
+
+    with pytest.raises(RuntimeError, match="served the agent server"):
+        start_studio(runtime=fake.build())
+
+    assert fake.opened_tunnel_protocols == [None, "http2"]
+    assert all(tunnel.killed for tunnel in fake.tunnels)
+    assert fake.rendered == []
 
 
 def test_start_studio_waits_between_tunnel_attempts():
