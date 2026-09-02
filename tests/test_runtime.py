@@ -1,6 +1,8 @@
 import email.message
+import json
 import logging
 import socket
+import ssl
 import sys
 import threading
 import types
@@ -545,6 +547,234 @@ def test_default_status_when_nothing_answers(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
 
     assert default_status("http://127.0.0.1:2024/ok") is None
+
+
+def test_default_status_resolves_a_tunnel_outside_the_local_dns_cache(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_runtime, "_url_status", lambda url, timeout: None)
+    monkeypatch.setattr(
+        _runtime, "_tunnel_addresses", lambda hostname, timeout: ("104.16.230.132",)
+    )
+
+    def status_at(target, address, timeout):
+        calls.append((target, address, timeout))
+        return 200
+
+    monkeypatch.setattr(_runtime, "_status_at_address", status_at)
+
+    assert default_status("https://x.trycloudflare.com/ok") == 200
+    target, address, timeout = calls[0]
+    assert (target.hostname, target.port, target.path) == (
+        "x.trycloudflare.com",
+        443,
+        "/ok",
+    )
+    assert (address, timeout) == ("104.16.230.132", 5.0)
+
+
+def test_default_status_does_not_replace_an_explicit_cloudflare_error(monkeypatch):
+    monkeypatch.setattr(_runtime, "_url_status", lambda url, timeout: 530)
+    monkeypatch.setattr(
+        _runtime,
+        "_tunnel_addresses",
+        lambda hostname, timeout: pytest.fail("an HTTP response is already a verdict"),
+    )
+
+    assert default_status("https://x.trycloudflare.com/ok") == 530
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://x.trycloudflare.com/ok",
+        "https://x.trycloudflare.com:444/ok",
+        "https://x.trycloudflare.com@127.0.0.1/ok",
+        "https://x.trycloudflare.com.example.com/ok",
+        "https://x.trycloudflare.com:bad/ok",
+    ],
+)
+def test_tunnel_target_rejects_urls_outside_the_quick_tunnel_origin(url):
+    assert _runtime._tunnel_target(url) is None
+
+
+def test_public_ipv4_answers_accepts_only_global_a_records():
+    payload = {
+        "Status": 0,
+        "Answer": [
+            {"type": 1, "data": "104.16.230.132"},
+            {"type": 1, "data": "127.0.0.1"},
+            {"type": 1, "data": "not-an-address"},
+            {"type": 1, "data": None},
+            {"type": 28, "data": "2606:4700::6810:e684"},
+            "not-an-answer",
+        ],
+    }
+
+    assert _runtime._public_ipv4_answers(payload) == ("104.16.230.132",)
+    assert _runtime._public_ipv4_answers({"Status": 2}) == ()
+    assert _runtime._public_ipv4_answers({"Status": 0}) == ()
+    assert _runtime._public_ipv4_answers([]) == ()
+
+
+def test_tunnel_addresses_uses_cloudflare_dns_over_https(monkeypatch):
+    requests = []
+
+    class Response(FakeResponse):
+        def read(self):
+            return json.dumps(
+                {"Status": 0, "Answer": [{"type": 1, "data": "104.16.230.132"}]}
+            ).encode()
+
+    def open_url(request, timeout):
+        requests.append((request, timeout))
+        return Response(200)
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_url)
+
+    assert _runtime._tunnel_addresses("x.trycloudflare.com", 4.0) == ("104.16.230.132",)
+    request, timeout = requests[0]
+    assert request.full_url == (
+        "https://cloudflare-dns.com/dns-query?name=x.trycloudflare.com&type=A"
+    )
+    assert request.get_header("Accept") == "application/dns-json"
+    assert timeout == 4.0
+
+
+def test_tunnel_addresses_treats_an_unavailable_resolver_as_no_answer(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise OSError
+
+    monkeypatch.setattr(urllib.request, "urlopen", unavailable)
+
+    assert _runtime._tunnel_addresses("x.trycloudflare.com", 5.0) == ()
+
+
+def test_resolved_https_connection_preserves_the_tunnel_hostname_for_tls(monkeypatch):
+    raw_socket = object()
+    wrapped_socket = object()
+    created = []
+    wrapped = []
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        lambda address, timeout: created.append((address, timeout)) or raw_socket,
+    )
+
+    class Context:
+        verify_mode = ssl.CERT_REQUIRED
+        check_hostname = True
+
+        def wrap_socket(self, sock, *, server_hostname):
+            wrapped.append((sock, server_hostname))
+            return wrapped_socket
+
+    monkeypatch.setattr(ssl, "create_default_context", Context)
+    connection = _runtime._ResolvedHTTPSConnection(
+        "x.trycloudflare.com", "104.16.230.132", port=443, timeout=5.0
+    )
+    connection.connect()
+
+    assert created == [(("104.16.230.132", 443), 5.0)]
+    assert wrapped == [(raw_socket, "x.trycloudflare.com")]
+    assert connection.sock is wrapped_socket
+
+
+def test_resolved_https_connection_closes_a_socket_that_fails_tls(monkeypatch):
+    class Socket:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    raw_socket = Socket()
+    monkeypatch.setattr(socket, "create_connection", lambda *args: raw_socket)
+
+    class Context:
+        verify_mode = ssl.CERT_REQUIRED
+        check_hostname = True
+
+        def wrap_socket(self, sock, *, server_hostname):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(ssl, "create_default_context", Context)
+    connection = _runtime._ResolvedHTTPSConnection(
+        "x.trycloudflare.com", "104.16.230.132", port=443, timeout=5.0
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        connection.connect()
+
+    assert raw_socket.closed is True
+
+
+def test_status_at_address_uses_the_original_origin_and_closes_the_connection(monkeypatch):
+    calls = []
+
+    class Connection:
+        def __init__(self, hostname, address, *, port, timeout):
+            calls.append(("init", hostname, address, port, timeout))
+
+        def request(self, method, path):
+            calls.append(("request", method, path))
+
+        def getresponse(self):
+            return FakeResponse(200)
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(_runtime, "_ResolvedHTTPSConnection", Connection)
+    target = _runtime._TunnelTarget("x.trycloudflare.com", 443, "/ok?probe=1")
+
+    assert _runtime._status_at_address(target, "104.16.230.132", 5.0) == 200
+    assert calls == [
+        ("init", "x.trycloudflare.com", "104.16.230.132", 443, 5.0),
+        ("request", "GET", "/ok?probe=1"),
+        ("close",),
+    ]
+
+
+def test_status_at_address_closes_a_connection_that_does_not_answer(monkeypatch):
+    closed = []
+
+    class Connection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, method, path):
+            raise OSError
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(_runtime, "_ResolvedHTTPSConnection", Connection)
+    target = _runtime._TunnelTarget("x.trycloudflare.com", 443, "/ok")
+
+    assert _runtime._status_at_address(target, "104.16.230.132", 5.0) is None
+    assert closed == [True]
+
+
+def test_resolved_tunnel_status_bounds_and_exhausts_address_attempts(monkeypatch):
+    attempts = []
+    monkeypatch.setattr(
+        _runtime,
+        "_tunnel_addresses",
+        lambda hostname, timeout: ("104.16.230.132", "104.16.231.132"),
+    )
+    monkeypatch.setattr(
+        _runtime,
+        "_status_at_address",
+        lambda target, address, timeout: attempts.append((address, timeout)),
+    )
+
+    assert _runtime._resolved_tunnel_status("https://x.trycloudflare.com/ok", 5.0) is None
+    assert attempts == [("104.16.230.132", 2.5), ("104.16.231.132", 2.5)]
+
+
+def test_resolved_tunnel_status_stops_when_dns_has_no_addresses(monkeypatch):
+    monkeypatch.setattr(_runtime, "_tunnel_addresses", lambda hostname, timeout: ())
+
+    assert _runtime._resolved_tunnel_status("https://x.trycloudflare.com/ok", 5.0) is None
 
 
 def _langsmith_client(sessions):

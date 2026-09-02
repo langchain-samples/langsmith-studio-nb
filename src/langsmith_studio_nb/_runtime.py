@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import http.client
+import ipaddress
+import json
 import logging
 import os
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from concurrent.futures import Future
@@ -27,6 +32,8 @@ from langsmith_studio_nb._ports import LOOPBACK
 from langsmith_studio_nb._render import link_html, link_text
 
 _TUNNEL_URL = re.compile(r"(https://[A-Za-z0-9.-]+\.trycloudflare\.com)")
+_TUNNEL_HOST = re.compile(r"[A-Za-z0-9.-]+\.trycloudflare\.com", re.ASCII)
+_DNS_OVER_HTTPS = "https://cloudflare-dns.com/dns-query"
 
 tunnel_logger = logging.getLogger(TUNNEL_LOGGER)
 
@@ -78,6 +85,15 @@ class OpenTunnel(Protocol):
     def __call__(self, port: int, *, protocol: str | None = None) -> OpenedTunnel:
         """Open a tunnel to `port`, optionally over a named cloudflared protocol."""
         ...
+
+
+@dataclass(frozen=True)
+class _TunnelTarget:
+    """An HTTPS request constrained to a Cloudflare quick-tunnel origin."""
+
+    hostname: str
+    port: int
+    path: str
 
 
 def default_run_server(**kwargs: Any) -> None:  # noqa: ANN401 - forwards run_server's own options
@@ -328,21 +344,135 @@ def default_open_tunnel(
     )
 
 
-def default_status(url: str, *, timeout: float = 5.0) -> int | None:
-    """Return the status `url` answers with, or None when nothing answered.
-
-    The difference matters for a tunnel. An error from Cloudflare means it
-    routes to nothing, while no answer at all means only that this host could
-    not reach it. Every local failure reads as no answer on purpose: this is a
-    health probe in a retry loop, and it must not be the thing that raises.
-    """
+def _url_status(url: str, timeout: float) -> int | None:
+    """Return an ordinary URL request's status, or None when nothing answered."""
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - URL comes from the server we started
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - callers constrain health-check URLs
             return int(response.status)
     except urllib.error.HTTPError as error:  # a status, not a failure to reach
         return int(error.code)
     except OSError:
         return None
+
+
+def _tunnel_target(url: str) -> _TunnelTarget | None:
+    """Parse an exact HTTPS quick-tunnel URL, rejecting every other origin."""
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    hostname = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or _TUNNEL_HOST.fullmatch(hostname) is None
+    ):
+        return None
+    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    return _TunnelTarget(hostname=hostname, port=443, path=path)
+
+
+def _public_ipv4_answers(payload: object) -> tuple[str, ...]:
+    """Take unique public IPv4 addresses from a successful DNS JSON response."""
+    if not isinstance(payload, dict) or payload.get("Status") != 0:
+        return ()
+    answers = payload.get("Answer")
+    if not isinstance(answers, list):
+        return ()
+    addresses: dict[str, None] = {}
+    for answer in answers:
+        if not isinstance(answer, dict) or answer.get("type") != 1:
+            continue
+        candidate = answer.get("data")
+        if not isinstance(candidate, str):
+            continue
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if isinstance(address, ipaddress.IPv4Address) and address.is_global:
+            addresses[str(address)] = None
+    return tuple(addresses)
+
+
+def _tunnel_addresses(hostname: str, timeout: float) -> tuple[str, ...]:
+    """Resolve a quick-tunnel hostname without relying on the notebook's DNS cache."""
+    query = urllib.parse.urlencode({"name": hostname, "type": "A"})
+    request = urllib.request.Request(  # noqa: S310 - fixed HTTPS endpoint
+        f"{_DNS_OVER_HTTPS}?{query}", headers={"Accept": "application/dns-json"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed Cloudflare endpoint
+            payload = json.load(response)
+    except (OSError, TypeError, ValueError):
+        return ()
+    return _public_ipv4_answers(payload)
+
+
+class _ResolvedHTTPSConnection(http.client.HTTPSConnection):
+    """An HTTPS connection whose address is known but whose TLS identity is unchanged."""
+
+    def __init__(self, hostname: str, address: str, *, port: int, timeout: float) -> None:
+        tls_context = ssl.create_default_context()
+        super().__init__(hostname, port=port, timeout=timeout, context=tls_context)
+        self._address = address
+        self._tls_context = tls_context
+
+    def connect(self) -> None:
+        """Connect to the resolved address and authenticate the original hostname."""
+        raw_socket = socket.create_connection((self._address, self.port), self.timeout)
+        try:
+            self.sock = self._tls_context.wrap_socket(raw_socket, server_hostname=self.host)
+        except BaseException:
+            raw_socket.close()
+            raise
+
+
+def _status_at_address(target: _TunnelTarget, address: str, timeout: float) -> int | None:
+    """Request `target` through one address while retaining its HTTPS identity."""
+    connection = _ResolvedHTTPSConnection(
+        target.hostname, address, port=target.port, timeout=timeout
+    )
+    try:
+        connection.request("GET", target.path)
+        return int(connection.getresponse().status)
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        connection.close()
+
+
+def _resolved_tunnel_status(url: str, timeout: float) -> int | None:
+    """Probe a quick tunnel through fresh public DNS answers."""
+    target = _tunnel_target(url)
+    if target is None:
+        return None
+    addresses = _tunnel_addresses(target.hostname, timeout)
+    if not addresses:
+        return None
+    per_address_timeout = timeout / len(addresses)
+    for address in addresses:
+        status = _status_at_address(target, address, per_address_timeout)
+        if status is not None:
+            return status
+    return None
+
+
+def default_status(url: str, *, timeout: float = 5.0) -> int | None:
+    """Return the status `url` answers with, or None when nothing answered.
+
+    The difference matters for a tunnel. An error from Cloudflare means it
+    routes to nothing, while no answer at all means only that this host could
+    not reach it. Colab can cache a new quick-tunnel hostname as missing after
+    browsers can reach it, so retry those through fresh DNS-over-HTTPS answers.
+    Every failure still reads as no answer: this probe must not be what raises.
+    """
+    status = _url_status(url, timeout)
+    return status if status is not None else _resolved_tunnel_status(url, timeout)
 
 
 def default_port_is_free(port: int, *, host: str = LOOPBACK) -> bool:
